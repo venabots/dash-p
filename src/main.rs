@@ -1,4 +1,4 @@
-//! anyagent: one non-interactive interface in front of any coding-agent CLI.
+//! dash-p: one non-interactive interface in front of any coding-agent CLI.
 //!
 //! A thin adapter, not an orchestrator: it normalizes how you *invoke* and
 //! *observe* a one-shot agent run across harnesses while preserving each
@@ -53,7 +53,7 @@ fn write_meta_file(opts: &Options, metadata: &Metadata) {
     let Some(path) = &opts.meta_file else { return };
     let json = metadata.to_json().to_string();
     if let Err(e) = std::fs::write(path, format!("{json}\n")) {
-        eprintln!("anyagent: failed writing --meta-file {path}: {e}");
+        eprintln!("dash-p: failed writing --meta-file {path}: {e}");
     }
 }
 
@@ -64,7 +64,7 @@ fn main() -> ExitCode {
     let command = match command::parse(&raw) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("anyagent: {e}");
+            eprintln!("dash-p: {e}");
             return ExitCode::from(2);
         }
     };
@@ -88,7 +88,7 @@ fn render(f: impl FnOnce(&mut dyn Write) -> std::io::Result<()>) -> ExitCode {
     match f(&mut out) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("anyagent: write failed: {e}");
+            eprintln!("dash-p: write failed: {e}");
             ExitCode::from(ExitStatus::Internal.code())
         }
     }
@@ -102,7 +102,7 @@ fn run(mut opts: Options) -> ExitCode {
         Some(a) => a,
         None => {
             eprintln!(
-                "anyagent: the '{}' harness is recognised but not implemented yet \
+                "dash-p: the '{}' harness is recognised but not implemented yet \
                  (today: claude, or a path to a claude-compatible binary). \
                  Recognised names: {}.",
                 opts.harness.name(),
@@ -121,19 +121,19 @@ fn run(mut opts: Options) -> ExitCode {
     // work without shell escaping).
     if opts.prompt.is_empty() {
         if std::io::stdin().is_terminal() {
-            eprintln!("anyagent: no prompt given (pass a prompt argument or pipe one on stdin)");
+            eprintln!("dash-p: no prompt given (pass a prompt argument or pipe one on stdin)");
             return ExitCode::from(2);
         }
         let mut s = String::new();
         if let Err(e) = std::io::stdin().read_to_string(&mut s) {
-            eprintln!("anyagent: failed reading stdin: {e}");
+            eprintln!("dash-p: failed reading stdin: {e}");
             return ExitCode::from(2);
         }
         opts.prompt = s.trim_end_matches('\n').to_string();
     }
 
     if opts.prompt.is_empty() {
-        eprintln!("anyagent: empty prompt");
+        eprintln!("dash-p: empty prompt");
         return ExitCode::from(2);
     }
 
@@ -153,7 +153,7 @@ fn run(mut opts: Options) -> ExitCode {
     // enforcement class. This is what turns "the prompt is a firewall, not a
     // sandbox" into an actual guarantee.
     if let Err(msg) = adapters::check_enforcement(adapter.as_ref(), &opts) {
-        eprintln!("anyagent: {msg}");
+        eprintln!("dash-p: {msg}");
         write_meta_file(
             &opts,
             &build_meta(&opts, None, 0, ExitStatus::EnforcementUnsupported, enforcement, drive),
@@ -206,14 +206,14 @@ fn run(mut opts: Options) -> ExitCode {
                     }
                 };
                 if let Err(e) = res {
-                    eprintln!("anyagent: write failed: {e}");
+                    eprintln!("dash-p: write failed: {e}");
                     return ExitCode::from(ExitStatus::Internal.code());
                 }
             }
             ExitCode::from(status.code())
         }
         Err(e) => {
-            eprintln!("anyagent: {e}");
+            eprintln!("dash-p: {e}");
             let status = e.status();
             write_meta_file(&opts, &build_meta(&opts, None, 0, status, enforcement, drive));
             ExitCode::from(status.code())

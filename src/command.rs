@@ -3,8 +3,8 @@
 //!
 //! `run`/`list`/`capabilities` are recognised only as the *first* argument
 //! (like git/docker); anything else is treated as a prompt for `run`, so
-//! `anyagent "summarize this"` still works. A prompt that literally starts with
-//! one of those words can be forced with `anyagent run -- "run the tests"`.
+//! `dash-p "summarize this"` still works. A prompt that literally starts with
+//! one of those words can be forced with `dash-p run -- "run the tests"`.
 
 use std::io::Write;
 
@@ -25,7 +25,7 @@ pub enum Command {
 /// Parse argv (excluding argv[0]) into a command.
 pub fn parse(raw: &[String]) -> Result<Command, ArgError> {
     // `--help`/`--version` win wherever they appear among the options (before a
-    // `--`), so `anyagent run --help` and a bare `anyagent --help` both work. A
+    // `--`), so `dash-p run --help` and a bare `dash-p --help` both work. A
     // prompt that literally needs the token can use `run -- "--help"`.
     let opt_tokens = || raw.iter().take_while(|a| a.as_str() != "--");
     if opt_tokens().any(|a| a == "-h" || a == "--help") {
@@ -49,18 +49,18 @@ pub fn parse(raw: &[String]) -> Result<Command, ArgError> {
 
 /// Top-level `--help` text.
 pub const HELP: &str = "\
-anyagent — one non-interactive interface in front of any coding-agent CLI.
+dash-p — one non-interactive interface in front of any coding-agent CLI.
 
 A thin adapter, not an orchestrator: it runs one agent well and reports the
 truth about what model ran and what was enforced. stdout carries only the
 answer; metadata goes to --meta-file; logs go to stderr.
 
 Usage:
-  anyagent [run] [options] [--] \"<prompt>\"   run a one-shot prompt
-  anyagent list harnesses                     installed/implemented harnesses + versions
-  anyagent list models [--harness <name>]     best-effort model discovery
-  anyagent capabilities [--harness <name>]    per-harness perms→enforcement, network, outputs
-  anyagent --help | --version
+  dash-p [run] [options] [--] \"<prompt>\"     run a one-shot prompt
+  dash-p list harnesses                     installed/implemented harnesses + versions
+  dash-p list models [--harness <name>]     best-effort model discovery
+  dash-p capabilities [--harness <name>]    per-harness perms→enforcement, network, outputs
+  dash-p --help | --version
 
 `run` is the default; a bare prompt is sugar for it, and if no prompt is given
 it is read from stdin. `run`/`list`/`capabilities` are only recognised as the

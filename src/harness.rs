@@ -1,6 +1,6 @@
-//! Selection of which agent CLI ("harness") anyagent drives.
+//! Selection of which agent CLI ("harness") dash-p drives.
 //!
-//! anyagent aims to be one non-interactive interface in front of any coding
+//! dash-p aims to be one non-interactive interface in front of any coding
 //! agent. Today only the Claude protocol is implemented -- by default via
 //! `claude -p` (print mode), or, with the undocumented `--pty` flag, by
 //! spawning the interactive TUI under a PTY, injecting a Stop hook via
@@ -11,7 +11,7 @@
 //!
 //! A value that is not a known name is treated as a path/binary and driven with
 //! the Claude protocol, so a fork or wrapper of `claude` can be pointed at
-//! directly (this subsumes the `ANYAGENT_CLAUDE_BIN` escape hatch).
+//! directly (this subsumes the `DASHP_CLAUDE_BIN` escape hatch).
 
 /// Known harness names, in the order shown in help/error text.
 pub const KNOWN_NAMES: &[&str] = &["claude", "codex", "opencode", "gemini", "pi"];
@@ -72,7 +72,7 @@ impl Harness {
             .map(str::to_string)
     }
 
-    /// The binary anyagent spawns for this harness.
+    /// The binary dash-p spawns for this harness.
     pub fn bin(&self) -> &str {
         match self {
             Self::Claude => "claude",

@@ -123,7 +123,7 @@ impl DecResponder {
             b'q' => {
                 // XTVERSION.
                 if private_gt {
-                    out.extend_from_slice(b"\x1bP>|anyagent\x1b\\");
+                    out.extend_from_slice(b"\x1bP>|dash-p\x1b\\");
                 }
             }
             // Window-size report in characters: 8 ; rows ; cols t
@@ -162,7 +162,7 @@ mod tests {
     fn xtversion_is_dcs_wrapped() {
         let mut d = DecResponder::new(40, 120);
         let r = d.feed(b"\x1b[>q");
-        assert!(r.starts_with(b"\x1bP>|anyagent"));
+        assert!(r.starts_with(b"\x1bP>|dash-p"));
         assert!(r.ends_with(b"\x1b\\"));
     }
 

@@ -1,8 +1,8 @@
 name: bump-tap
 
-# On a `v*` tag, point the venables/homebrew-tap anyagent formula at the new
+# On a `v*` tag, point the venabots/homebrew-tap dash-p formula at the new
 # source tarball. Requires a HOMEBREW_TAP_TOKEN secret (a PAT with write access
-# to venables/homebrew-tap). This is anyagent's sole release channel.
+# to venabots/homebrew-tap). This is dash-p's sole release channel.
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
       - name: Checkout tap
         uses: actions/checkout@v4
         with:
-          repository: venables/homebrew-tap
+          repository: venabots/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Update formula
@@ -24,7 +24,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          tarball="https://github.com/venables/anyagent/archive/refs/tags/${TAG}.tar.gz"
+          tarball="https://github.com/venabots/dash-p/archive/refs/tags/${TAG}.tar.gz"
 
           # Retry: GitHub occasionally serves the archive a few seconds after
           # the tag push event arrives.
@@ -35,7 +35,7 @@ jobs:
           sed -i \
             -e "s|^  url .*|  url \"$tarball\"|" \
             -e "s|^  sha256 .*|  sha256 \"$sha\"|" \
-            Formula/anyagent.rb
+            Formula/dash-p.rb
 
       - name: Commit and push
         env:
@@ -45,10 +45,10 @@ jobs:
           version="${TAG#v}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/anyagent.rb
+          git add Formula/dash-p.rb
           if git diff --cached --quiet; then
             echo "no changes to commit"
             exit 0
           fi
-          git commit -m "anyagent: bump to ${version}"
+          git commit -m "dash-p: bump to ${version}"
           git push

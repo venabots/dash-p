@@ -1,34 +1,34 @@
 //! End-to-end tests against the real `claude` binary. No mocks: a mock would
 //! only mirror our assumptions about claude, not claude itself.
 //!
-//! Gated on `ANYAGENT_E2E=1` so a plain `cargo test` stays hermetic. Point at
-//! a specific binary with `ANYAGENT_CLAUDE_BIN=/path/to/claude` (required on
+//! Gated on `DASHP_E2E=1` so a plain `cargo test` stays hermetic. Point at
+//! a specific binary with `DASHP_CLAUDE_BIN=/path/to/claude` (required on
 //! machines where `claude` on PATH is a wrapper that injects its own
 //! `--settings`, e.g. cmux).
 //!
 //! Run:
-//!   ANYAGENT_E2E=1 ANYAGENT_CLAUDE_BIN=/path/to/claude \
+//!   DASHP_E2E=1 DASHP_CLAUDE_BIN=/path/to/claude \
 //!     cargo test --test integration -- --test-threads=1 --nocapture
 
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_anyagent");
+const BIN: &str = env!("CARGO_BIN_EXE_dash-p");
 
 fn e2e_enabled() -> bool {
-    std::env::var("ANYAGENT_E2E").as_deref() == Ok("1")
+    std::env::var("DASHP_E2E").as_deref() == Ok("1")
 }
 
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(BIN)
         .args(args)
         .output()
-        .expect("failed to spawn anyagent")
+        .expect("failed to spawn dash-p")
 }
 
 #[test]
 fn text_mode_returns_answer() {
     if !e2e_enabled() {
-        eprintln!("skipping (set ANYAGENT_E2E=1)");
+        eprintln!("skipping (set DASHP_E2E=1)");
         return;
     }
     let out = run(&[
@@ -49,7 +49,7 @@ fn text_mode_returns_answer() {
 #[test]
 fn json_mode_is_well_formed() {
     if !e2e_enabled() {
-        eprintln!("skipping (set ANYAGENT_E2E=1)");
+        eprintln!("skipping (set DASHP_E2E=1)");
         return;
     }
     let out = run(&[
@@ -74,7 +74,7 @@ fn json_mode_is_well_formed() {
 #[test]
 fn stream_json_emits_lines_then_result() {
     if !e2e_enabled() {
-        eprintln!("skipping (set ANYAGENT_E2E=1)");
+        eprintln!("skipping (set DASHP_E2E=1)");
         return;
     }
     let out = run(&[

@@ -1,4 +1,4 @@
-# anyagent — Specification
+# dash-p — Specification
 
 A Rust CLI that puts **one non-interactive interface in front of any
 coding-agent CLI**. It is a thin _adapter_, not an orchestrator: it normalizes
@@ -11,7 +11,7 @@ the caller.
 
 The two things every harness is vague about — _what model actually ran_ and
 _what was actually enforced_ — are the two an orchestrator most needs to trust.
-anyagent's job is to tell the truth about both. Principles:
+dash-p's job is to tell the truth about both. Principles:
 
 1. **Honest over uniform.** Where harnesses genuinely differ (enforcement
    strength, model identity), report the difference — never paper over it.
@@ -218,7 +218,7 @@ subagent flag). Implemented:
 `claude` (`claude -p`, or the `--pty` fallback: PTY + Stop hook) and `codex`
 (`codex exec`, a plain subprocess reading the `--json` event stream); a custom
 path is driven as a claude-compatible binary.
-`ANYAGENT_CLAUDE_BIN` overrides the `claude` binary. The codex adapter reads
+`DASHP_CLAUDE_BIN` overrides the `claude` binary. The codex adapter reads
 `model_resolved` from codex's session rollout file (`turn_context.payload.model`)
 since the event stream omits it.
 
@@ -230,7 +230,7 @@ since the event stream omits it.
 4. `args` — every flag and rejection.
 5. `emit` — golden text/json shapes.
 6. `stream` — tailer line-buffering across appends.
-7. `tests/integration.rs` — real `claude`, gated on `ANYAGENT_E2E=1`.
+7. `tests/integration.rs` — real `claude`, gated on `DASHP_E2E=1`.
 
 ## 6. Non-goals
 
@@ -244,5 +244,5 @@ since the event stream omits it.
 | ----------------------------------- | ------------------------------------------------------------- |
 | Hook payload schema change          | Parse defensively; fall back to transcript / payload message. |
 | New Ink startup probe               | Add a case to `dec::DecResponder::respond`.                   |
-| Wrapper injects `--settings` (cmux) | `ANYAGENT_CLAUDE_BIN` to bypass.                              |
+| Wrapper injects `--settings` (cmux) | `DASHP_CLAUDE_BIN` to bypass.                              |
 | Child outlives parent               | Process-group SIGTERM→SIGKILL; SIGINT handler.                |

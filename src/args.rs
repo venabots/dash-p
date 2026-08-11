@@ -2,17 +2,17 @@
 //! are mapped onto the child `claude` invocation; anything we don't recognise
 //! is forwarded verbatim so the wrapper stays useful as Claude Code evolves.
 //!
-//! `-p` / `--print` is accepted but ignored: anyagent *is* print mode (it
+//! `-p` / `--print` is accepted but ignored: dash-p *is* print mode (it
 //! emulates `claude -p` by driving interactive mode), so the flag is redundant
 //! rather than contradictory, and swallowing it lets callers that invoke
-//! `claude -p "..."` point at anyagent unchanged. It must not be forwarded to
+//! `claude -p "..."` point at dash-p unchanged. It must not be forwarded to
 //! the child `claude` -- doing so would enable real print mode and break the
 //! Stop-hook capture. A user-supplied `--settings` is rejected: we inject our
 //! own `--settings` to register the Stop hook.
 //!
 //! `-H` / `--harness` selects which agent CLI to drive (see `crate::harness`).
 //! `--agent` is deliberately not used: claude has its own `--agent <subagent>`
-//! flag, which anyagent forwards through untouched.
+//! flag, which dash-p forwards through untouched.
 
 use crate::harness::Harness;
 use crate::policy::{Network, Perms, RequireEnforcement};
@@ -92,7 +92,7 @@ impl std::fmt::Display for ArgError {
         match self {
             Self::SettingsRejected => write!(
                 f,
-                "--settings is rejected: anyagent injects its own settings to register the Stop hook"
+                "--settings is rejected: dash-p injects its own settings to register the Stop hook"
             ),
             Self::MissingValue(flag) => write!(f, "flag {flag} requires a value"),
             Self::BadOutputFormat(v) => {
@@ -163,14 +163,14 @@ pub fn parse(args: &[String]) -> Result<Options, ArgError> {
         };
 
         match flag {
-            // Accepted but ignored: anyagent already emulates print mode, so
+            // Accepted but ignored: dash-p already emulates print mode, so
             // -p/--print is redundant. It must be swallowed here rather than
             // forwarded -- passing it to the child claude would enable real
             // print mode and break the Stop-hook capture.
             "-p" | "--print" => {}
             "--settings" => return Err(ArgError::SettingsRejected),
             // `-H`/`--harness` (not `--agent`) selects the backend: claude has
-            // its own native `--agent <subagent>` flag, so anyagent leaves that
+            // its own native `--agent <subagent>` flag, so dash-p leaves that
             // name alone and forwards it through (see `KNOWN_VALUE_FLAGS`).
             "-H" | "--harness" => {
                 opts.harness = Harness::parse(value(inline, args, &mut i, flag)?);
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn print_flag_accepted_as_noop() {
-        // -p/--print is redundant (anyagent is print mode) -- accepted, ignored,
+        // -p/--print is redundant (dash-p is print mode) -- accepted, ignored,
         // and not forwarded to the child claude.
         let o = parse(&v(&["-p", "hi"])).unwrap();
         assert_eq!(o.prompt, "hi");
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn agent_flag_is_forwarded_not_harness_select() {
-        // `--agent` is claude's own subagent flag; anyagent must NOT consume it
+        // `--agent` is claude's own subagent flag; dash-p must NOT consume it
         // as harness selection -- it forwards it (with its value) to claude and
         // leaves the harness at the default.
         let o = parse(&v(&["--agent", "reviewer", "hi"])).unwrap();

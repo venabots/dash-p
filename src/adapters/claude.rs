@@ -65,7 +65,7 @@ struct Parsed {
     usage: Usage,
 }
 
-/// claude's print-mode output format for a given anyagent output format.
+/// claude's print-mode output format for a given dash-p output format.
 fn claude_format(output: OutputFormat) -> &'static str {
     match output {
         OutputFormat::StreamJson => "stream-json",

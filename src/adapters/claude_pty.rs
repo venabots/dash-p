@@ -98,7 +98,7 @@ pub fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<Run
     let harness = HookHarness::create().map_err(DriverError::Io)?;
     let argv = build_argv(opts, &harness.settings_json);
     if opts.debug {
-        eprintln!("[anyagent] argv: {argv:?}");
+        eprintln!("[dash-p] argv: {argv:?}");
     }
 
     // Open the FIFO read side (non-blocking) before spawning so the child's
@@ -118,7 +118,7 @@ pub fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<Run
 
     let mut extra_env = BTreeMap::new();
     extra_env.insert(
-        "ANYAGENT_FIFO".to_string(),
+        "DASHP_FIFO".to_string(),
         harness.fifo_path.to_string_lossy().into_owned(),
     );
 
@@ -192,7 +192,7 @@ pub fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<Run
                         saw_session_start = true;
                         shared.session_started.store(true, Ordering::SeqCst);
                         if opts.debug {
-                            eprintln!("[anyagent +{}ms] SessionStart", start.elapsed().as_millis());
+                            eprintln!("[dash-p +{}ms] SessionStart", start.elapsed().as_millis());
                         }
                         if streaming && transcript_path.is_none() {
                             transcript_path = hook::extract_fields(&ev.payload).transcript_path;
@@ -200,7 +200,7 @@ pub fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<Run
                     }
                     hook::HookEvent::Stop => {
                         if opts.debug {
-                            eprintln!("[anyagent +{}ms] Stop", start.elapsed().as_millis());
+                            eprintln!("[dash-p +{}ms] Stop", start.elapsed().as_millis());
                         }
                         if transcript_path.is_none() {
                             transcript_path = hook::extract_fields(&ev.payload).transcript_path;
@@ -220,7 +220,7 @@ pub fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<Run
         if line_buf.len() > MAX_LINE_BUF {
             if opts.debug {
                 eprintln!(
-                    "[anyagent] dropping {} bytes of unterminated FIFO data",
+                    "[dash-p] dropping {} bytes of unterminated FIFO data",
                     line_buf.len()
                 );
             }
@@ -481,13 +481,13 @@ fn pump_loop(
                         let _ = writer.flush();
                         trust_dismissed = true;
                         if shared.debug {
-                            eprintln!("[anyagent] workspace-trust dialog dismissed");
+                            eprintln!("[dash-p] workspace-trust dialog dismissed");
                         }
                     }
                 }
 
                 if shared.debug {
-                    eprintln!("[anyagent] pty {n} bytes");
+                    eprintln!("[dash-p] pty {n} bytes");
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn build_argv_minimal_puts_prompt_last() {
         let v = build_argv(&opts(), "{}");
-        assert_eq!(v[0], std::env::var("ANYAGENT_CLAUDE_BIN").unwrap_or_else(|_| "claude".into()));
+        assert_eq!(v[0], std::env::var("DASHP_CLAUDE_BIN").unwrap_or_else(|_| "claude".into()));
         assert_eq!(v[1], "--settings");
         assert_eq!(v[2], "{}");
         assert_eq!(v.last().unwrap(), "hi");

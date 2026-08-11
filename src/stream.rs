@@ -63,7 +63,7 @@ mod tests {
     fn tmp_path(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
         let uniq = format!(
-            "anyagent-stream-test-{}-{}",
+            "dash-p-stream-test-{}-{}",
             std::process::id(),
             name
         );

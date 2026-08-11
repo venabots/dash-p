@@ -1,6 +1,6 @@
 //! Harness adapters.
 //!
-//! Each backend agent CLI ("harness") is driven by an [`Adapter`]. anyagent's
+//! Each backend agent CLI ("harness") is driven by an [`Adapter`]. dash-p's
 //! goal is one non-interactive interface in front of any coding agent, while
 //! preserving each agent's native behavior -- so an adapter shells out to the
 //! real harness binary rather than reimplementing it.
@@ -33,7 +33,7 @@ pub mod codex;
 pub mod opencode;
 pub mod procgroup;
 
-/// A backend agent CLI that anyagent can drive to run a single prompt to
+/// A backend agent CLI that dash-p can drive to run a single prompt to
 /// completion. Implementations shell out to the native harness binary.
 pub trait Adapter {
     /// Run a single prompt to completion. When `stream_out` is `Some` and the

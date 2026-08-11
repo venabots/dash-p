@@ -16,12 +16,12 @@ use nix::unistd;
 
 const SCRIPT_BODY: &str = "\
 #!/bin/sh
-# Relay a Claude Code hook event to anyagent's FIFO.
+# Relay a Claude Code hook event to dash-p's FIFO.
 #   $1 = event name (e.g. \"Stop\", \"SessionStart\")
 # stdin = the hook's JSON payload (single line, no embedded newlines).
 set -eu
 event=\"$1\"
-fifo=\"${ANYAGENT_FIFO:?missing ANYAGENT_FIFO}\"
+fifo=\"${DASHP_FIFO:?missing DASHP_FIFO}\"
 payload=\"$(cat)\"
 printf '%s\\t%s\\n' \"$event\" \"$payload\" >> \"$fifo\"
 exit 0
@@ -53,7 +53,7 @@ impl HookHarness {
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_nanos())
                     .unwrap_or(0);
-                let candidate = root.join(format!("anyagent-{pid}-{nanos:x}-{attempt}"));
+                let candidate = root.join(format!("dash-p-{pid}-{nanos:x}-{attempt}"));
                 match builder.create(&candidate) {
                     Ok(()) => {
                         chosen = Some(candidate);
