@@ -5,7 +5,7 @@
 
 use crate::args::Options;
 use crate::harness::Harness;
-use crate::policy::{Enforcement, Network, Perms};
+use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
 
 /// Resolve the claude binary to spawn. `DASHP_CLAUDE_BIN` overrides it (for
 /// tests, or a cmux-style shim that would clobber our flags); a custom harness
@@ -69,9 +69,14 @@ pub fn perms_enforcement(perms: Perms) -> Enforcement {
     }
 }
 
-/// claude has no native network control.
-pub fn network_enforcement(_perms: Option<Perms>, _network: Network) -> Enforcement {
-    Enforcement::Unenforced
+/// claude has no network control of any kind -- no sandbox, and no flag that
+/// gates egress. Every tier is accepted (callers pass one tier across mixed
+/// harnesses, so failing here would break a run that codex handles fine), but
+/// the run really does get an open network, so that is what gets reported:
+/// `network_effective: "full"` with `network_enforcement: "none"`. Echoing the
+/// requested tier back would make `--network none` read like a real block.
+pub fn network_plan(_perms: Option<Perms>, _network: Network, _bypass: bool) -> NetworkPlan {
+    NetworkPlan::open()
 }
 
 #[cfg(test)]
@@ -112,5 +117,21 @@ mod tests {
             ..Options::default()
         };
         assert_eq!(perms_args(&opts), vec!["--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn every_network_tier_is_accepted_and_reported_as_an_open_network() {
+        // claude cannot gate egress at all. Accepting the tier keeps a caller's
+        // uniform `--network` working across mixed harnesses, but the run really
+        // has an open network -- so `effective` is Full for every request. An
+        // echo of the requested tier would make `--network none` read like a
+        // real block.
+        for network in [Network::None, Network::Restricted, Network::Full] {
+            for perms in [None, Some(Perms::ReadOnly), Some(Perms::Full)] {
+                let plan = network_plan(perms, network, false);
+                assert_eq!(plan.effective, Network::Full);
+                assert_eq!(plan.enforcement, Enforcement::Unenforced);
+            }
+        }
     }
 }

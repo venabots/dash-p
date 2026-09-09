@@ -25,7 +25,7 @@ use serde_json::Value;
 use crate::adapters::procgroup;
 use crate::adapters::{Adapter, DriverError, RunOutcome};
 use crate::args::Options;
-use crate::policy::{Enforcement, Network, Perms};
+use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
 use crate::signals;
 use crate::transcript::{Summary, Usage};
 
@@ -61,10 +61,18 @@ impl Adapter for OpencodeAdapter {
         Enforcement::Unenforced
     }
 
-    fn network_enforcement(&self, _perms: Option<Perms>, _network: Network) -> Enforcement {
-        // opencode does not sandbox network at all, so we can never honestly
-        // claim a network tier is enforced.
-        Enforcement::Unenforced
+    fn network_plan(
+        &self,
+        _perms: Option<Perms>,
+        _network: Network,
+        _bypass: bool,
+    ) -> Result<NetworkPlan, String> {
+        // opencode does not sandbox network at all. Every tier is still
+        // accepted -- callers pass one tier across mixed harnesses -- but the
+        // run gets an open network, so the envelope reports
+        // `network_effective: "full"` with `network_enforcement: "none"` rather
+        // than echoing a tier nothing held.
+        Ok(NetworkPlan::open())
     }
 }
 
@@ -500,6 +508,19 @@ mod tests {
         assert!(v.contains(&"--auto".to_string()));
         assert_eq!(v[v.len() - 2], "--");
         assert_eq!(v.last().unwrap(), "hi");
+    }
+
+    #[test]
+    fn every_network_tier_is_accepted_and_reported_as_an_open_network() {
+        // opencode has no sandbox at all, so every request leaves the network
+        // open. Reporting the requested tier back would hide that.
+        for network in [Network::None, Network::Restricted, Network::Full] {
+            let plan = OpencodeAdapter
+                .network_plan(Some(Perms::ReadOnly), network, false)
+                .unwrap();
+            assert_eq!(plan.effective, Network::Full);
+            assert_eq!(plan.enforcement, Enforcement::Unenforced);
+        }
     }
 
     #[test]

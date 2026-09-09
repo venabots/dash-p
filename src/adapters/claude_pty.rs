@@ -30,7 +30,7 @@ use crate::adapters::claude_common;
 use crate::adapters::{Adapter, DriverError, RunOutcome};
 use crate::args::{Options, OutputFormat};
 use crate::dec::DecResponder;
-use crate::policy::{Enforcement, Network, Perms};
+use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
 use crate::hook::{self, HookHarness, PayloadFields};
 use crate::pty::{self, SpawnConfig};
 use crate::signals;
@@ -73,8 +73,13 @@ impl Adapter for ClaudePtyAdapter {
         claude_common::perms_enforcement(perms)
     }
 
-    fn network_enforcement(&self, perms: Option<Perms>, network: Network) -> Enforcement {
-        claude_common::network_enforcement(perms, network)
+    fn network_plan(
+        &self,
+        perms: Option<Perms>,
+        network: Network,
+        bypass: bool,
+    ) -> Result<NetworkPlan, String> {
+        Ok(claude_common::network_plan(perms, network, bypass))
     }
 }
 

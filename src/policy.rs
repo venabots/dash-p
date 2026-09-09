@@ -91,6 +91,54 @@ impl Enforcement {
     }
 }
 
+/// The network tier a run actually gets, and how strongly it is held.
+///
+/// `effective` can differ from what was requested: codex's `read-only` sandbox
+/// blocks network unconditionally, so `--perms read-only --network full` really
+/// runs with no network at all. Reporting that difference is the whole point --
+/// a caller must be able to tell a real block from a flag that did nothing.
+///
+/// The invariant that keeps `effective` honest: **it never claims more
+/// restriction than dash-p can prove.** Nothing enforced means the network is,
+/// or may be, wide open, so an unenforced plan always reports `Full` -- see
+/// [`NetworkPlan::open`]. Under-claiming is the safe direction; over-claiming is
+/// the exact failure this type exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkPlan {
+    pub effective: Network,
+    /// Enforcement class of the **effective** tier. `Full` is never "enforced":
+    /// an unrestricted network has no restriction to hold.
+    pub enforcement: Enforcement,
+}
+
+impl NetworkPlan {
+    /// Nothing holds the tier, so the network is (or may be) open.
+    ///
+    /// Takes no tier by design: a harness that enforces nothing cannot report a
+    /// restricted `effective`, and making that unrepresentable is what stops
+    /// `--network none` on claude from reading like a real block. A caller sees
+    /// `network_effective: "full"` with `network_enforcement: "none"` and knows
+    /// the flag did nothing.
+    pub fn open() -> Self {
+        Self { effective: Network::Full, enforcement: Enforcement::Unenforced }
+    }
+
+    /// A tier held by an OS sandbox: the agent physically cannot exceed it.
+    pub fn os_sandbox(effective: Network) -> Self {
+        Self { effective, enforcement: Enforcement::OsSandbox }
+    }
+}
+
+/// What a run actually enforced, for the metadata envelope. Grouped so the
+/// perms and network verdicts travel together instead of as loose arguments.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Enforced {
+    /// Enforcement class achieved for the requested `--perms` tier.
+    pub perms: Option<Enforcement>,
+    /// Effective network tier and its enforcement class.
+    pub network: Option<NetworkPlan>,
+}
+
 impl RequireEnforcement {
     pub fn parse(s: &str) -> Option<Self> {
         match s {

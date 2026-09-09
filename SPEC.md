@@ -173,11 +173,43 @@ Tool denial keeps the requested model and the same agent-policy class.
 
 `--require-enforcement <os-sandbox|any>` is checked before spawn
 (`adapters::check_enforcement`): if the harness's class for the requested tier
-is weaker than demanded, exit 32 (`enforcement-unsupported`). `--network none`
-is os-sandbox-enforced only where the harness sandbox already blocks network
-(codex read-only / workspace-write). v1 is report + passthrough — it never
-_adds_ a sandbox a harness lacks. The `perms`/`enforcement`/`network` metadata
-fields carry the requested tiers and achieved class (`null` when unrequested).
+is weaker than demanded, exit 32 (`enforcement-unsupported`). dash-p never
+_adds_ a sandbox a harness lacks; where there is no mechanism it passes the tier
+through and reports it unenforced.
+
+Network is resolved separately, by `Adapter::network_plan` →
+`policy::NetworkPlan { effective, enforcement }`:
+
+| intent       | codex (with `--perms read-only\|workspace-write`)              | claude / opencode |
+| ------------ | -------------------------------------------------------------- | ----------------- |
+| `none`       | `-c sandbox_workspace_write.network_access=false` (os-sandbox) | none              |
+| `restricted` | `Err` → exit 32 (codex has no domain allowlist)                | none              |
+| `full`       | `-c sandbox_workspace_write.network_access=true`               | none              |
+
+The codex column holds only with a sandboxed `--perms` tier. `restricted` is
+rejected either way — the tier has no codex equivalent, so `--perms` cannot
+change that. Without `--perms`, codex resolves the sandbox mode from its own
+config, which dash-p cannot confirm, so `none` and `full` both resolve to
+`open()` — `full` / `none`.
+
+`build_argv` pins that switch whenever `--network` is passed, so the request
+beats a `network_access = true` in the user's `config.toml` — without the pin
+the sandbox stays on and blocks the filesystem while the network is open, which
+is a run that looks enforced and is not. codex's read-only sandbox has no such
+switch and blocks network unconditionally, so `--perms read-only --network full`
+resolves to `effective: none`; `--perms full` and
+`--dangerously-skip-permissions` remove the sandbox and hold nothing.
+
+`NetworkPlan.effective` never claims more restriction than dash-p can prove:
+`NetworkPlan::open()` takes no tier, so an unenforced plan always reports `Full`
+and `--network none` on claude cannot read like a real block. Under-claiming is
+the safe direction.
+
+A tier the harness cannot express is rejected (exit 32) rather than rounded to a
+neighbour; a tier it downgrades is warned on stderr and recorded. The
+`perms`/`enforcement`/`network`/`network_effective`/`network_enforcement`
+metadata fields carry the requested tiers, the tier that actually applied, and
+the achieved classes (`null` when unrequested).
 
 ### 3.3 Exit codes
 
@@ -204,8 +236,10 @@ distinctly.
 sugar), `list harnesses`, `list models [--harness X]`, `capabilities
 [--harness X]`. Subcommands are recognised only as the first argument, so a
 bare prompt still works. `capabilities` renders the per-harness perms ->
-enforcement map, network control, and output modes from the `Adapter` trait, so
-callers stop hardcoding harness knowledge. `list models` is best-effort: codex
+enforcement map, the per-tier network map (including `unsupported`), and output
+modes from the `Adapter` trait, so callers stop hardcoding harness knowledge.
+Both maps come from the same methods a run uses, so the advertised behavior
+cannot drift from the enforced one. `list models` is best-effort: codex
 has no enumeration command, so it reports the configured default from
 `config.toml`; claude exposes none, so it points at the aliases.
 
@@ -244,5 +278,5 @@ since the event stream omits it.
 | ----------------------------------- | ------------------------------------------------------------- |
 | Hook payload schema change          | Parse defensively; fall back to transcript / payload message. |
 | New Ink startup probe               | Add a case to `dec::DecResponder::respond`.                   |
-| Wrapper injects `--settings` (cmux) | `DASHP_CLAUDE_BIN` to bypass.                              |
+| Wrapper injects `--settings` (cmux) | `DASHP_CLAUDE_BIN` to bypass.                                 |
 | Child outlives parent               | Process-group SIGTERM→SIGKILL; SIGINT handler.                |

@@ -38,10 +38,10 @@ fn build_meta(
     summary: Option<&transcript::Summary>,
     duration_ms: u64,
     status: ExitStatus,
-    enforcement: Option<policy::Enforcement>,
+    enforced: policy::Enforced,
     drive: &'static str,
 ) -> Metadata {
-    let mut m = Metadata::build(opts, summary, duration_ms, status, enforcement, drive);
+    let mut m = Metadata::build(opts, summary, duration_ms, status, enforced, drive);
     m.harness_version = opts.harness.probe_version();
     m
 }
@@ -110,7 +110,14 @@ fn run(mut opts: Options) -> ExitCode {
             );
             write_meta_file(
                 &opts,
-                &build_meta(&opts, None, 0, ExitStatus::HarnessNotFound, None, "unknown"),
+                &build_meta(
+                    &opts,
+                    None,
+                    0,
+                    ExitStatus::HarnessNotFound,
+                    policy::Enforced::default(),
+                    "unknown",
+                ),
             );
             return ExitCode::from(ExitStatus::HarnessNotFound.code());
         }
@@ -141,7 +148,7 @@ fn run(mut opts: Options) -> ExitCode {
     // reported in metadata. A bypass flag disables enforcement outright, so
     // report `Unenforced` rather than the tier's nominal class (the preflight
     // in `check_enforcement` rejects the same combination up front).
-    let enforcement = opts.perms.map(|p| {
+    let perms_enforcement = opts.perms.map(|p| {
         if opts.skip_permissions {
             policy::Enforcement::Unenforced
         } else {
@@ -149,14 +156,53 @@ fn run(mut opts: Options) -> ExitCode {
         }
     });
 
+    // Resolve `--network` against the harness before spawning: a tier the
+    // harness cannot express at all (codex has no domain allowlist, so
+    // `restricted` is meaningless there) is a hard stop, not a silent downgrade
+    // to whichever neighbouring tier happens to be implementable.
+    let network = match adapters::resolve_network(adapter.as_ref(), &opts) {
+        Ok(plan) => plan,
+        Err(msg) => {
+            eprintln!("dash-p: {msg}");
+            write_meta_file(
+                &opts,
+                &build_meta(
+                    &opts,
+                    None,
+                    0,
+                    ExitStatus::EnforcementUnsupported,
+                    policy::Enforced { perms: perms_enforcement, network: None },
+                    drive,
+                ),
+            );
+            return ExitCode::from(ExitStatus::EnforcementUnsupported.code());
+        }
+    };
+    let enforced = policy::Enforced { perms: perms_enforcement, network };
+
+    // A tier the harness *can* express but not at the level asked for is
+    // reported in the envelope -- warn on stderr too, so a human running by
+    // hand isn't left to infer it from a later confusing failure.
+    if let (Some(requested), Some(plan)) = (opts.network, network)
+        && plan.effective != requested
+    {
+        eprintln!(
+            "dash-p: --network {} is unavailable with these settings; \
+             running with network={} (enforcement: {})",
+            requested.label(),
+            plan.effective.label(),
+            plan.enforcement.label(),
+        );
+    }
+
     // Fail fast, before spawning, if the harness can't meet a demanded
     // enforcement class. This is what turns "the prompt is a firewall, not a
     // sandbox" into an actual guarantee.
-    if let Err(msg) = adapters::check_enforcement(adapter.as_ref(), &opts) {
+    if let Err(msg) = adapters::check_enforcement(adapter.as_ref(), &opts, network) {
         eprintln!("dash-p: {msg}");
         write_meta_file(
             &opts,
-            &build_meta(&opts, None, 0, ExitStatus::EnforcementUnsupported, enforcement, drive),
+            &build_meta(&opts, None, 0, ExitStatus::EnforcementUnsupported, enforced, drive),
         );
         return ExitCode::from(ExitStatus::EnforcementUnsupported.code());
     }
@@ -186,7 +232,7 @@ fn run(mut opts: Options) -> ExitCode {
                 Some(&outcome.summary),
                 outcome.duration_ms,
                 status,
-                enforcement,
+                enforced,
                 drive,
             );
             write_meta_file(&opts, &metadata);
@@ -215,7 +261,7 @@ fn run(mut opts: Options) -> ExitCode {
         Err(e) => {
             eprintln!("dash-p: {e}");
             let status = e.status();
-            write_meta_file(&opts, &build_meta(&opts, None, 0, status, enforcement, drive));
+            write_meta_file(&opts, &build_meta(&opts, None, 0, status, enforced, drive));
             ExitCode::from(status.code())
         }
     }

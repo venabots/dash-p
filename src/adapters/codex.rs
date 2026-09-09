@@ -25,7 +25,7 @@ use serde_json::Value;
 use crate::adapters::procgroup;
 use crate::adapters::{Adapter, DriverError, RunOutcome};
 use crate::args::Options;
-use crate::policy::{Enforcement, Network, Perms};
+use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
 use crate::signals;
 use crate::transcript::{Summary, Usage};
 
@@ -62,19 +62,69 @@ impl Adapter for CodexAdapter {
         }
     }
 
-    fn network_enforcement(&self, perms: Option<Perms>, network: Network) -> Enforcement {
-        match network {
-            // codex's read-only/workspace-write sandboxes disable network by
-            // default, so requesting no network is OS-enforced there.
-            Network::None => match perms {
-                Some(Perms::ReadOnly) | Some(Perms::WorkspaceWrite) => Enforcement::OsSandbox,
-                _ => Enforcement::Unenforced,
-            },
-            // We don't open the sandbox's network back up, so anything other
-            // than "none" is best-effort passthrough.
-            Network::Restricted | Network::Full => Enforcement::Unenforced,
+    fn network_plan(
+        &self,
+        perms: Option<Perms>,
+        network: Network,
+        bypass: bool,
+    ) -> Result<NetworkPlan, String> {
+        // codex has no domain-allowlist setting -- its sandbox network switch is
+        // a boolean. There is no honest mapping for "some network", and silently
+        // picking `none` or `full` is exactly the lie this crate exists to
+        // avoid, so reject the tier instead.
+        if network == Network::Restricted {
+            return Err(
+                "--network restricted is unsupported: codex's sandbox network switch is \
+                 all-or-nothing (no domain allowlist). Use --network none or --network full"
+                    .to_string(),
+            );
         }
+        // The bypass flag turns the sandbox off outright, so the network is open
+        // whatever tier was asked for.
+        if bypass {
+            return Ok(NetworkPlan::open());
+        }
+        Ok(match perms {
+            // The read-only sandbox blocks network unconditionally: codex
+            // exposes `network_access` only for workspace-write, so a `full`
+            // request here really runs with no network. Report the downgrade.
+            Some(Perms::ReadOnly) => NetworkPlan::os_sandbox(Network::None),
+            // The one tier with a real switch, and `build_argv` pins it rather
+            // than inheriting whatever the user's config.toml happens to say.
+            Some(Perms::WorkspaceWrite) => match network {
+                Network::None => NetworkPlan::os_sandbox(Network::None),
+                _ => NetworkPlan::open(),
+            },
+            // danger-full-access removes the sandbox, so nothing is held.
+            Some(Perms::Full) => NetworkPlan::open(),
+            // Without --perms, codex resolves the sandbox mode from its own
+            // config, which dash-p does not control and cannot read reliably
+            // (profiles, env, layered files). The override we pass applies only
+            // if that mode is workspace-write, and `danger-full-access` would
+            // leave the network open -- so claim nothing rather than report a
+            // block we cannot prove.
+            None => NetworkPlan::open(),
+        })
     }
+}
+
+/// The `-c` override that pins codex's workspace-write network switch.
+///
+/// Without it the value falls back to the user's own `config.toml`, where a
+/// `[sandbox_workspace_write] network_access = true` silently defeats
+/// `--network none` -- the sandbox stays on and keeps blocking the filesystem,
+/// so the run *looks* sandboxed while the network is wide open. Only
+/// workspace-write reads this key: read-only blocks network unconditionally and
+/// danger-full-access has no sandbox, so the override is inert (and harmless)
+/// for both.
+fn network_access_override(network: Network) -> String {
+    let access = match network {
+        // Restricted is rejected in `network_plan` before a run gets here; deny
+        // is the safe reading if it ever does.
+        Network::None | Network::Restricted => false,
+        Network::Full => true,
+    };
+    format!("sandbox_workspace_write.network_access={access}")
 }
 
 /// Accumulated state folded from the codex `--json` event stream.
@@ -275,6 +325,14 @@ fn build_argv(opts: &Options) -> Vec<String> {
             v.push("danger-full-access".to_string());
         }
         None => {}
+    }
+    // Pin the sandbox's network switch whenever a tier was requested, so the
+    // caller's intent wins over the user's config.toml. Left untouched when no
+    // `--network` was passed, so callers that never opt in keep codex's own
+    // configured behavior.
+    if let Some(network) = opts.network {
+        v.push("-c".to_string());
+        v.push(network_access_override(network));
     }
     if opts.skip_permissions {
         v.push("--dangerously-bypass-approvals-and-sandbox".to_string());
@@ -581,5 +639,408 @@ mod tests {
         assert!(v.windows(2).any(|w| w == ["--model", "gpt-5.5"]));
         assert!(v.windows(2).any(|w| w == ["--cd", "/work"]));
         assert!(v.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    }
+
+    fn opts_for(perms: Option<Perms>, network: Option<Network>) -> Options {
+        Options { perms, network, ..Options::default() }
+    }
+
+    /// The network `-c` override specifically -- `build_argv` emits more than
+    /// one `-c`, so match on the key rather than taking the first.
+    fn network_override(argv: &[String]) -> Option<&str> {
+        argv.iter()
+            .map(String::as_str)
+            .find(|a| a.starts_with("sandbox_workspace_write.network_access="))
+    }
+
+    #[test]
+    fn build_argv_pins_the_sandbox_network_switch() {
+        // The bug this fixes: without an explicit override the value falls back
+        // to the user's config.toml, where `network_access = true` silently
+        // defeats `--network none` while the sandbox still looks active.
+        let none = build_argv(&opts_for(Some(Perms::WorkspaceWrite), Some(Network::None)));
+        assert_eq!(
+            network_override(&none),
+            Some("sandbox_workspace_write.network_access=false")
+        );
+
+        let full = build_argv(&opts_for(Some(Perms::WorkspaceWrite), Some(Network::Full)));
+        assert_eq!(
+            network_override(&full),
+            Some("sandbox_workspace_write.network_access=true")
+        );
+    }
+
+    #[test]
+    fn build_argv_leaves_network_alone_when_unrequested() {
+        // Callers that never opt in keep codex's own configured behavior.
+        let v = build_argv(&opts_for(Some(Perms::WorkspaceWrite), None));
+        assert_eq!(network_override(&v), None);
+    }
+
+    #[test]
+    fn network_full_survives_both_live_call_shapes() {
+        // `--network full` is passed with a bypass (PR review) and with
+        // workspace-write. Both must reach codex with the network open.
+        let bypass = Options {
+            skip_permissions: true,
+            network: Some(Network::Full),
+            ..Options::default()
+        };
+        let v = build_argv(&bypass);
+        assert_eq!(
+            network_override(&v),
+            Some("sandbox_workspace_write.network_access=true")
+        );
+        assert!(v.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+
+        let ws = build_argv(&opts_for(Some(Perms::WorkspaceWrite), Some(Network::Full)));
+        assert!(ws.windows(2).any(|w| w == ["--sandbox", "workspace-write"]));
+        assert_eq!(
+            network_override(&ws),
+            Some("sandbox_workspace_write.network_access=true")
+        );
+    }
+
+    #[test]
+    fn network_plan_reports_each_tier_honestly() {
+        let a = CodexAdapter;
+
+        // workspace-write is the tier with a real switch.
+        assert_eq!(
+            a.network_plan(Some(Perms::WorkspaceWrite), Network::None, false).unwrap(),
+            NetworkPlan::os_sandbox(Network::None)
+        );
+        assert_eq!(
+            a.network_plan(Some(Perms::WorkspaceWrite), Network::Full, false).unwrap(),
+            NetworkPlan::open()
+        );
+
+        // read-only blocks network unconditionally, so `full` is downgraded.
+        assert_eq!(
+            a.network_plan(Some(Perms::ReadOnly), Network::None, false).unwrap(),
+            NetworkPlan::os_sandbox(Network::None)
+        );
+        assert_eq!(
+            a.network_plan(Some(Perms::ReadOnly), Network::Full, false).unwrap(),
+            NetworkPlan::os_sandbox(Network::None)
+        );
+
+        // A bypass removes the sandbox, so nothing is held whatever was asked.
+        assert_eq!(
+            a.network_plan(Some(Perms::WorkspaceWrite), Network::None, true).unwrap(),
+            NetworkPlan::open()
+        );
+        assert_eq!(
+            a.network_plan(Some(Perms::Full), Network::None, false).unwrap(),
+            NetworkPlan::open()
+        );
+
+        // Without --perms the sandbox mode comes from codex's own config, which
+        // dash-p cannot confirm -- so report an open network rather than a block
+        // it cannot prove, even though the override is still passed.
+        assert_eq!(
+            a.network_plan(None, Network::None, false).unwrap(),
+            NetworkPlan::open()
+        );
+    }
+
+    #[test]
+    fn an_unenforced_plan_never_claims_a_restricted_tier() {
+        // The invariant that stops `--network none` reading like a real block on
+        // a harness that enforces nothing.
+        let plan = NetworkPlan::open();
+        assert_eq!(plan.effective, Network::Full);
+        assert_eq!(plan.enforcement, Enforcement::Unenforced);
+    }
+
+    #[test]
+    fn network_plan_rejects_restricted() {
+        let err = CodexAdapter
+            .network_plan(Some(Perms::WorkspaceWrite), Network::Restricted, false)
+            .unwrap_err();
+        assert!(err.contains("unsupported"), "got: {err}");
+        assert!(err.contains("allowlist"), "explains why: {err}");
+    }
+
+    // ---- observed-outcome probes -------------------------------------------
+    //
+    // These assert what the sandbox *does*, not what `capabilities` advertises.
+    // They drive `codex sandbox` -- the same config keys as `codex exec`, but a
+    // plain command under seatbelt, so there is no model call and no cost.
+    //
+    // They skip where the environment cannot support them (no codex, no
+    // outbound network), so a plain `cargo test` stays green anywhere. A skip
+    // proves nothing, so CI should set `DASHP_REQUIRE_PROBES=1` to turn every
+    // skip into a failure.
+
+    const PROBE_URL: &str = "https://example.com";
+
+    /// Skip a probe, or fail when the environment promised to support it.
+    /// Returns `true`, so a caller can write `if <cannot run> && skip(..)
+    /// { return }` and read it as "skipping, so return".
+    fn skip(reason: &str) -> bool {
+        assert!(
+            std::env::var("DASHP_REQUIRE_PROBES").as_deref() != Ok("1"),
+            "DASHP_REQUIRE_PROBES=1 but the probe could not run: {reason}"
+        );
+        eprintln!("skipping: {reason}");
+        true
+    }
+
+    /// Translate the `codex exec` argv dash-p builds into the equivalent
+    /// `codex sandbox` invocation: same `-c` overrides, but the sandbox mode
+    /// arrives as a config key rather than codex exec's `--sandbox` flag.
+    /// Driving the real `build_argv` output is the point -- a hand-written flag
+    /// list here could drift from what dash-p actually sends.
+    fn sandbox_argv_from(exec_argv: &[String]) -> Vec<String> {
+        let mut v = vec!["sandbox".to_string()];
+        let mut i = 0;
+        while i < exec_argv.len() {
+            match exec_argv[i].as_str() {
+                "--sandbox" => {
+                    v.push("-c".to_string());
+                    // `{:?}` quotes it, which is what TOML wants for a string.
+                    v.push(format!("sandbox_mode={:?}", exec_argv[i + 1]));
+                    i += 2;
+                }
+                // Only `-c` carries over. `codex sandbox` demands a
+                // `--permission-profile` as soon as `--cd` appears, so the probe
+                // sets the workspace with the process working directory instead.
+                "-c" => {
+                    v.push("-c".to_string());
+                    v.push(exec_argv[i + 1].clone());
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+        }
+        v
+    }
+
+    /// A token unique to this call, for probe paths. The process id alone is
+    /// shared by every test in the binary, and cargo runs them in parallel.
+    fn probe_token() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// As `probe_token`, plus a clock reading, so a path is not guessable ahead
+    /// of time.
+    fn unique_token() -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{}-{nanos:x}", probe_token())
+    }
+
+    /// A throwaway workspace under `target/`, outside `$TMPDIR`. codex's
+    /// workspace-write tier makes `$TMPDIR` writable by itself, so a probe
+    /// workspace there cannot distinguish "the workspace root is right" from
+    /// "this happens to be the temp dir".
+    fn probe_workspace() -> Option<std::path::PathBuf> {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("dash-p-probes");
+        std::fs::create_dir_all(&base).ok()?;
+        let dir = base.join(format!("ws-{}", unique_token()));
+        std::fs::create_dir(&dir).ok()?;
+        Some(dir)
+    }
+
+    /// Create `dir` with mode 0700 in one step. Fails if it already exists, so a
+    /// pre-created path cannot be reused.
+    #[cfg(unix)]
+    fn create_private_dir(dir: &std::path::Path) -> Option<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(dir).ok()
+    }
+
+    #[cfg(not(unix))]
+    fn create_private_dir(dir: &std::path::Path) -> Option<()> {
+        std::fs::create_dir(dir).ok()
+    }
+
+    /// A throwaway `CODEX_HOME` whose config contradicts the guarantee the
+    /// probes assert: an open sandbox network.
+    ///
+    /// Without it the probes inherit the developer's config. On a machine using
+    /// codex's defaults, `network_access` is already false, so deleting dash-p's
+    /// pin would make the open-network control skip instead of fail and the
+    /// probe would quietly lose its teeth. `codex sandbox` runs a plain command
+    /// and needs no credentials, so this home holds only a `config.toml`.
+    fn hostile_codex_home() -> Option<std::path::PathBuf> {
+        // Exclusive create with 0700 in one step: `temp_dir()` is shared on
+        // Linux, so a guessable pre-created path would let another local user
+        // make `config.toml` a symlink and have the write below follow it.
+        let home = std::env::temp_dir().join(format!("dash-p-probe-home-{}", unique_token()));
+        create_private_dir(&home)?;
+        std::fs::write(
+            home.join("config.toml"),
+            "[sandbox_workspace_write]\nnetwork_access = true\n",
+        )
+        .ok()?;
+        Some(home)
+    }
+
+    /// Run `argv` under the sandbox dash-p's own flags describe. `None` when
+    /// codex isn't installed. `cwd` becomes the sandbox's workspace root, and
+    /// the run always uses a hostile `CODEX_HOME` so the pins are contradicted.
+    fn under_sandbox_in(
+        exec_argv: &[String],
+        cwd: Option<&std::path::Path>,
+        argv: &[&str],
+    ) -> Option<std::process::Output> {
+        let mut a = sandbox_argv_from(exec_argv);
+        a.push("--".to_string());
+        a.extend(argv.iter().map(|s| s.to_string()));
+        let mut cmd = std::process::Command::new("codex");
+        cmd.args(&a);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        // No hostile home means no probe. Falling back to the developer's real
+        // config would quietly disarm the probe: on a machine with codex's
+        // defaults, a deleted pin would still pass.
+        let home = hostile_codex_home()?;
+        cmd.env("CODEX_HOME", &home);
+        let out = cmd.output().ok();
+        let _ = std::fs::remove_dir_all(&home);
+        out
+    }
+
+    fn under_sandbox(exec_argv: &[String], argv: &[&str]) -> Option<std::process::Output> {
+        under_sandbox_in(exec_argv, None, argv)
+    }
+
+    /// Whether a network call actually gets out of that sandbox. `None` when
+    /// codex could not run the command at all -- a usage or config error would
+    /// otherwise read as "the network was blocked" and pass a probe vacuously.
+    fn network_reachable(exec_argv: &[String]) -> Option<bool> {
+        let out = under_sandbox(
+            exec_argv,
+            // Short timeout: a machine with codex but no network otherwise
+            // stalls every probe for the full duration.
+            &["curl", "-sS", "-m", "5", "-o", "/dev/null", "-w", "%{http_code}", PROBE_URL],
+        )?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("Usage:") || stderr.contains("error: ") {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).contains("200"))
+    }
+
+    /// The open-network control: proves the probe can reach the network at all
+    /// under this codex, so a later block is the sandbox and not a broken
+    /// environment. `false` means the caller should skip.
+    fn network_control_reaches_out() -> bool {
+        let full = build_argv(&opts_for(Some(Perms::WorkspaceWrite), Some(Network::Full)));
+        match network_reachable(&full) {
+            None => !skip("codex cannot run a sandboxed command"),
+            Some(false) => !skip(&format!("no outbound network reached {PROBE_URL}")),
+            Some(true) => true,
+        }
+    }
+
+    #[test]
+    fn network_none_actually_blocks_the_network() {
+        if !network_control_reaches_out() {
+            return;
+        }
+        let none_argv = build_argv(&opts_for(Some(Perms::WorkspaceWrite), Some(Network::None)));
+        // The control proved the probe can reach the network, so a block here is
+        // the sandbox and not a flaky link or a broken codex.
+        assert_eq!(
+            network_reachable(&none_argv),
+            Some(false),
+            "--network none did not block the network: dash-p emitted {none_argv:?}"
+        );
+    }
+
+    #[test]
+    fn read_only_blocks_the_network_whatever_tier_was_asked_for() {
+        // `network_plan` downgrades read-only + `full` to `none` on the claim
+        // that the read-only sandbox has no network switch. That claim is
+        // load-bearing -- read-only + full even passes `network_access=true` in
+        // argv -- so probe it rather than trust it.
+        if !network_control_reaches_out() {
+            return;
+        }
+        let argv = build_argv(&opts_for(Some(Perms::ReadOnly), Some(Network::Full)));
+        assert_eq!(
+            network_reachable(&argv),
+            Some(false),
+            "read-only reached the network, so the downgrade to none is wrong: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_write_sandbox_blocks_writes_outside_the_workspace() {
+        // The control from the original report: the OS sandbox really is on for
+        // the same invocation, so a network leak is a --network wiring gap
+        // rather than a missing sandbox.
+        let Ok(home) = std::env::var("HOME") else {
+            skip("no HOME");
+            return;
+        };
+        // Under `target/`, deliberately NOT under $TMPDIR: codex's
+        // workspace-write tier makes $TMPDIR writable on its own, so a workspace
+        // there would let the inside-write control pass without proving the
+        // workspace root is what dash-p asked for.
+        let Some(tmp) = probe_workspace() else {
+            skip("cannot create a workspace dir");
+            return;
+        };
+        // The temp dir is the workspace root (set as the process working
+        // directory), so "outside the workspace" is well defined.
+        let argv = build_argv(&opts_for(Some(Perms::WorkspaceWrite), Some(Network::None)));
+
+        // Can codex run a sandboxed command here at all? A no-op separates a
+        // broken environment (missing binary, no `sandbox` subcommand, bad
+        // config key) from a sandbox that ran and denied something.
+        match under_sandbox_in(&argv, Some(&tmp), &["true"]) {
+            Some(out) if out.status.success() => {}
+            _ => {
+                let _ = std::fs::remove_dir_all(&tmp);
+                skip("codex cannot run a sandboxed command");
+                return;
+            }
+        }
+
+        // Positive control: the same invocation must ALLOW a write inside the
+        // workspace. codex ran a moment ago, so a denial here is a real defect
+        // (workspace-write delivered as read-only, say) and must fail rather
+        // than skip -- otherwise the denial below passes for the wrong reason.
+        let inside = tmp.join("inside.txt");
+        let allowed = under_sandbox_in(&argv, Some(&tmp), &["touch", &inside.to_string_lossy()])
+            .expect("codex ran a moment ago");
+        let inside_ok = allowed.status.success() && inside.exists();
+        if !inside_ok {
+            let _ = std::fs::remove_dir_all(&tmp);
+            panic!(
+                "workspace-write denied a write inside its own workspace ({}); \
+                 the sandbox mode mapping is wrong: {argv:?}",
+                inside.display()
+            );
+        }
+
+        // Now the real assertion: a write outside the workspace is denied.
+        let outside = format!("{home}/.dash-p-sandbox-probe-{}", probe_token());
+        let out = under_sandbox_in(&argv, Some(&tmp), &["touch", &outside])
+            .expect("codex ran a moment ago");
+        // Clean up in the failure case, where the sandbox let the write through.
+        let existed = std::path::Path::new(&outside).exists();
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            !existed && !out.status.success(),
+            "workspace-write sandbox allowed a write to {outside}"
+        );
     }
 }
