@@ -205,6 +205,33 @@ resolves to `effective: none`; `--perms full` and
 and `--network none` on claude cannot read like a real block. Under-claiming is
 the safe direction.
 
+An OS sandbox is only a guarantee while nothing can undo it, and the user's own
+`config.toml` can undo it two ways. Both were observed:
+
+- `approval_policy = "on-request"` with `approvals_reviewer = "auto_review"`
+  routes a sandbox denial to an approving reviewer, which re-runs the command
+  outside the sandbox. That defeated `--network none` and returned HTTP 200.
+- `writable_roots = ["/Users/<you>"]` widened workspace-write far enough to
+  write to `$HOME`.
+
+So `build_argv` pins `sandbox_integrity_overrides()` — `approval_policy="never"`
+and `sandbox_workspace_write.writable_roots=[]` — whenever the sandbox is
+load-bearing. `sandbox_is_load_bearing` is true for exactly
+`--perms read-only|workspace-write` without a bypass: precisely the runs dash-p
+reports as `os-sandbox`. A bypass and `--perms full` remove the sandbox, and
+without `--perms` nothing is promised, so those keep codex's own behavior. An
+invariant test asserts the pin set matches the runs that claim `os-sandbox`.
+
+`writable_roots` is codex's list of _additional_ roots, so `[]` leaves the
+workspace and `$TMPDIR` writable and removes only config-added roots. `--add-dir`
+is forwarded to codex's native flag, which keeps an explicit escape hatch open
+now that the config route is pinned shut.
+
+The claim's scope: `os-sandbox` covers the commands the agent runs. MCP servers
+declared in the user's codex config run as codex's own subprocesses, outside that
+sandbox, and `$TMPDIR` stays writable at the workspace-write tier. dash-p does
+not claim either, and the README states both.
+
 A tier the harness cannot express is rejected (exit 32) rather than rounded to a
 neighbour; a tier it downgrades is warned on stderr and recorded. The
 `perms`/`enforcement`/`network`/`network_effective`/`network_enforcement`

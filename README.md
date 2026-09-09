@@ -157,6 +157,43 @@ It does not _add_ a sandbox to a harness that lacks one: where a harness has no
 mechanism, the tier is passed through and reported unenforced rather than
 faked.
 
+**The sandbox is pinned when it is the promise.** A codex sandbox is only a
+guarantee while the user's own `config.toml` cannot undo it, and it can, two
+ways — both observed here:
+
+- `approval_policy = "on-request"` with `approvals_reviewer = "auto_review"`
+  sends a sandbox denial to an approving reviewer, which re-runs the command
+  _outside_ the sandbox. A `--network none` run escalated and fetched HTTP 200.
+- `writable_roots = ["/Users/<you>"]` widened `workspace-write` enough to write
+  to `$HOME`.
+
+So whenever dash-p reports `os-sandbox` it also passes
+`-c approval_policy="never"` and `-c sandbox_workspace_write.writable_roots=[]`.
+That is exactly `--perms read-only|workspace-write` without a bypass. A bypass
+and `--perms full` remove the sandbox, and without `--perms` dash-p promises
+nothing, so those keep codex's own behavior untouched.
+
+The trade: under `--perms`, a sandboxed run can no longer escalate to install a
+dependency, and extra `writable_roots` from your config do not apply. That is
+what asking for a sandbox means. `--add-dir` still works — it is explicit caller
+intent, and it is forwarded to codex's own flag — so a run that genuinely needs a
+second writable root can still say so.
+
+**What `os-sandbox` covers, exactly.** It means codex's sandbox holds for the
+commands the agent runs: the filesystem boundary, the network switch, the
+writable roots, and the approval path that could undo any of them. Two things
+sit outside that boundary, and dash-p does not claim them:
+
+- **MCP servers.** Servers in your codex config run as codex's own subprocesses,
+  not under the command sandbox. A configured MCP server with network or
+  filesystem access is a path the seatbelt does not cover. Run with a
+  `CODEX_HOME` that has no MCP servers if that matters to you.
+- **`$TMPDIR`.** codex's workspace-write tier makes the temp dir writable by
+  design, and dash-p keeps that (pinning it off would break ordinary tool use).
+
+Neither is introduced by dash-p, but `os-sandbox` should be read as "codex's
+sandbox, held to the tier you asked for", not "nothing can reach out".
+
 ### Network
 
 `--network` requests an egress tier the same way. Only codex can hold one, and

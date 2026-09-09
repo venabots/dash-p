@@ -127,6 +127,74 @@ fn network_access_override(network: Network) -> String {
     format!("sandbox_workspace_write.network_access={access}")
 }
 
+/// Pins codex's approval policy off whenever dash-p claims the sandbox holds.
+///
+/// The sandbox alone is not the whole story: with an escalation-capable
+/// approval policy (the user's config may set `approval_policy = "on-request"`
+/// with `approvals_reviewer = "auto_review"`), a sandbox-denied command is
+/// re-run *outside* the sandbox once the reviewer approves it. Observed: a
+/// `--network none` run escalated and fetched HTTP 200 anyway. That makes an
+/// `os-sandbox` claim false, so dash-p pins `never` and the escalation path
+/// closes.
+///
+/// This is why the pin is required rather than nice to have: `perms_enforcement`
+/// and `network_plan` both promise `os-sandbox`, and the promise only holds when
+/// no approval can undo it.
+const NO_ESCALATION_OVERRIDE: &str = "approval_policy=\"never\"";
+
+/// Pins the sandbox's writable area to the workspace itself.
+///
+/// `[sandbox_workspace_write] writable_roots` in the user's config widens the
+/// sandbox the same way `network_access` opened the network: observed, a config
+/// with `writable_roots = ["/Users/<you>"]` let a workspace-write run write to
+/// `$HOME`. Pinning it empty leaves the workspace (and codex's own temp
+/// defaults) writable and nothing else, so `os-sandbox` means the tier it names.
+const WORKSPACE_ONLY_OVERRIDE: &str = "sandbox_workspace_write.writable_roots=[]";
+
+/// The `-c` overrides that make an `os-sandbox` claim true: they stop the user's
+/// own `config.toml` from widening a sandbox dash-p is vouching for.
+fn sandbox_integrity_overrides() -> [&'static str; 2] {
+    [NO_ESCALATION_OVERRIDE, WORKSPACE_ONLY_OVERRIDE]
+}
+
+/// The `--add-dir` values the caller passed. `extra_args` holds the flags dash-p
+/// forwards rather than interprets -- including `--add-dir`, which `args.rs`
+/// lists in `KNOWN_VALUE_FLAGS` so its value is not swallowed into the prompt.
+/// The codex adapter cannot forward that list wholesale (the rest of it is
+/// claude's surface), so pull out just this one.
+fn add_dirs(opts: &Options) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut i = 0;
+    while i < opts.extra_args.len() {
+        let arg = &opts.extra_args[i];
+        if let Some(v) = arg.strip_prefix("--add-dir=") {
+            dirs.push(v.to_string());
+        } else if arg == "--add-dir"
+            && let Some(v) = opts.extra_args.get(i + 1)
+        {
+            dirs.push(v.clone());
+            i += 1;
+        }
+        i += 1;
+    }
+    dirs
+}
+
+/// Whether this run relies on codex's sandbox actually holding -- exactly the
+/// runs where dash-p reports `os-sandbox`.
+///
+/// That is only the two sandboxed `--perms` tiers. A bypass and `--perms full`
+/// remove the sandbox, and without `--perms` the mode comes from codex's own
+/// config, so `network_plan` already promises nothing. Pinning approvals where
+/// dash-p gives no guarantee would take away the user's configured escalation
+/// and hand back nothing for it.
+fn sandbox_is_load_bearing(opts: &Options) -> bool {
+    if opts.skip_permissions {
+        return false;
+    }
+    matches!(opts.perms, Some(Perms::ReadOnly) | Some(Perms::WorkspaceWrite))
+}
+
 /// Accumulated state folded from the codex `--json` event stream.
 #[derive(Debug, Default, PartialEq)]
 struct Folded {
@@ -310,6 +378,15 @@ fn build_argv(opts: &Options) -> Vec<String> {
         v.push("--cd".to_string());
         v.push(cwd.clone());
     }
+    // Forward `--add-dir` to codex's own flag. This is the escape hatch for an
+    // extra writable root: pinning `writable_roots=[]` (see
+    // `WORKSPACE_ONLY_OVERRIDE`) takes away the config-file route, so dropping
+    // the flag here would leave a sandboxed run no way to widen its workspace at
+    // all. The flag is explicit caller intent, unlike the ambient config.
+    for dir in add_dirs(opts) {
+        v.push("--add-dir".to_string());
+        v.push(dir);
+    }
     // Map the requested permission tier to codex's native OS sandbox.
     match opts.perms {
         Some(Perms::ReadOnly) => {
@@ -333,6 +410,15 @@ fn build_argv(opts: &Options) -> Vec<String> {
     if let Some(network) = opts.network {
         v.push("-c".to_string());
         v.push(network_access_override(network));
+    }
+    // Keep the sandbox intact whenever it is what dash-p is promising: an
+    // approved escalation would re-run the command outside it, and a widened
+    // `writable_roots` would move its boundary. Either makes the promise a lie.
+    if sandbox_is_load_bearing(opts) {
+        for override_ in sandbox_integrity_overrides() {
+            v.push("-c".to_string());
+            v.push(override_.to_string());
+        }
     }
     if opts.skip_permissions {
         v.push("--dangerously-bypass-approvals-and-sandbox".to_string());
@@ -755,6 +841,100 @@ mod tests {
     }
 
     #[test]
+    fn build_argv_closes_the_escalation_path_when_the_sandbox_is_the_promise() {
+        // Observed: with the user's `approval_policy = "on-request"` plus
+        // `approvals_reviewer = "auto_review"`, a --network none run escalated a
+        // sandbox-denied curl and fetched HTTP 200. Pinning `never` closes it.
+        for opts in [
+            opts_for(Some(Perms::ReadOnly), None),
+            opts_for(Some(Perms::ReadOnly), Some(Network::None)),
+            opts_for(Some(Perms::WorkspaceWrite), Some(Network::None)),
+            opts_for(Some(Perms::WorkspaceWrite), Some(Network::Full)),
+        ] {
+            let v = build_argv(&opts);
+            assert!(
+                v.windows(2).any(|w| w == ["-c", NO_ESCALATION_OVERRIDE]),
+                "sandbox run did not pin the approval policy: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_argv_pins_the_writable_roots_when_the_sandbox_is_the_promise() {
+        // Hermetic cover for the second pin. The observed-outcome probe needs
+        // codex installed, so without this a wrong key name stays green on a
+        // plain `cargo test`.
+        let v = build_argv(&opts_for(Some(Perms::WorkspaceWrite), Some(Network::None)));
+        assert!(
+            v.windows(2).any(|w| w == ["-c", WORKSPACE_ONLY_OVERRIDE]),
+            "sandbox run did not pin writable_roots: {v:?}"
+        );
+        assert_eq!(WORKSPACE_ONLY_OVERRIDE, "sandbox_workspace_write.writable_roots=[]");
+    }
+
+    #[test]
+    fn add_dir_reaches_codex_as_the_native_flag() {
+        // Pinning `writable_roots=[]` removes the config route to an extra
+        // writable root, so `--add-dir` has to survive as the explicit one.
+        let opts = Options {
+            perms: Some(Perms::WorkspaceWrite),
+            extra_args: vec![
+                "--add-dir".to_string(),
+                "/extra/one".to_string(),
+                "--add-dir=/extra/two".to_string(),
+            ],
+            ..Options::default()
+        };
+        let v = build_argv(&opts);
+        assert!(v.windows(2).any(|w| w == ["--add-dir", "/extra/one"]), "{v:?}");
+        assert!(v.windows(2).any(|w| w == ["--add-dir", "/extra/two"]), "{v:?}");
+    }
+
+    #[test]
+    fn the_escalation_pin_matches_the_runs_that_claim_os_sandbox() {
+        // The pin must cover exactly the runs dash-p reports as `os-sandbox`,
+        // no more. Pinning wider would strip a user's configured escalation on
+        // a run where dash-p promises nothing in return.
+        let a = CodexAdapter;
+        for perms in [None, Some(Perms::ReadOnly), Some(Perms::WorkspaceWrite), Some(Perms::Full)] {
+            for network in [None, Some(Network::None), Some(Network::Full)] {
+                for skip_permissions in [false, true] {
+                    let opts = Options { perms, network, skip_permissions, ..Options::default() };
+                    let claims_sandbox = !skip_permissions
+                        && (perms.is_some_and(|p| a.perms_enforcement(p) == Enforcement::OsSandbox)
+                            || network.is_some_and(|n| {
+                                a.network_plan(perms, n, skip_permissions)
+                                    .is_ok_and(|p| p.enforcement == Enforcement::OsSandbox)
+                            }));
+                    let pinned = build_argv(&opts)
+                        .iter()
+                        .any(|arg| arg == NO_ESCALATION_OVERRIDE);
+                    assert_eq!(
+                        pinned, claims_sandbox,
+                        "perms={perms:?} network={network:?} bypass={skip_permissions}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn build_argv_leaves_approvals_alone_when_no_sandbox_is_promised() {
+        // A bypass or danger-full-access has no sandbox to protect, so codex
+        // keeps the user's own approval behavior.
+        let bypass = Options { skip_permissions: true, ..Options::default() };
+        let full = opts_for(Some(Perms::Full), Some(Network::Full));
+        let none = Options::default();
+        for opts in [bypass, full, none] {
+            let v = build_argv(&opts);
+            assert!(
+                !v.iter().any(|a| a == NO_ESCALATION_OVERRIDE),
+                "pinned approvals with no sandbox to protect: {v:?}"
+            );
+        }
+    }
+
+    #[test]
     fn network_plan_rejects_restricted() {
         let err = CodexAdapter
             .network_plan(Some(Perms::WorkspaceWrite), Network::Restricted, false)
@@ -867,8 +1047,9 @@ mod tests {
         std::fs::create_dir(dir).ok()
     }
 
-    /// A throwaway `CODEX_HOME` whose config contradicts the guarantee the
-    /// probes assert: an open sandbox network.
+    /// A throwaway `CODEX_HOME` whose config contradicts every guarantee the
+    /// probes assert: an open network, an approving reviewer, and a widened
+    /// writable root.
     ///
     /// Without it the probes inherit the developer's config. On a machine using
     /// codex's defaults, `network_access` is already false, so deleting dash-p's
@@ -883,7 +1064,15 @@ mod tests {
         create_private_dir(&home)?;
         std::fs::write(
             home.join("config.toml"),
-            "[sandbox_workspace_write]\nnetwork_access = true\n",
+            format!(
+                "approval_policy = \"on-request\"\n\
+                 approvals_reviewer = \"auto_review\"\n\
+                 \n\
+                 [sandbox_workspace_write]\n\
+                 network_access = true\n\
+                 writable_roots = [{:?}]\n",
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()),
+            ),
         )
         .ok()?;
         Some(home)
@@ -963,6 +1152,13 @@ mod tests {
         );
     }
 
+    // `--add-dir` cannot be probed here: `codex sandbox` has no such flag, and
+    // translating it to a `writable_roots` override would test the config key
+    // instead of the flag. `build_argv` coverage is hermetic (see
+    // `add_dir_reaches_codex_as_the_native_flag`) and the observed behavior is
+    // covered end to end by `codex_add_dir_grants_a_writable_root` in
+    // tests/integration.rs.
+
     #[test]
     fn read_only_blocks_the_network_whatever_tier_was_asked_for() {
         // `network_plan` downgrades read-only + `full` to `none` on the claim
@@ -1028,6 +1224,29 @@ mod tests {
                  the sandbox mode mapping is wrong: {argv:?}",
                 inside.display()
             );
+        }
+
+        // Armed control: the hostile config widens `writable_roots` to $HOME, so
+        // the SAME command without dash-p's pin must be ALLOWED. If a future
+        // codex renames the key, the config stops arming the test and this skips
+        // rather than passing for free.
+        let armed_target = format!("{home}/.dash-p-armed-probe-{}", probe_token());
+        let unpinned: Vec<String> = argv
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| {
+                a.as_str() != WORKSPACE_ONLY_OVERRIDE
+                    && argv.get(i + 1).map(String::as_str) != Some(WORKSPACE_ONLY_OVERRIDE)
+            })
+            .map(|(_, a)| a.clone())
+            .collect();
+        let armed = under_sandbox_in(&unpinned, Some(&tmp), &["touch", &armed_target]);
+        let armed_allowed = std::path::Path::new(&armed_target).exists();
+        let _ = std::fs::remove_file(&armed_target);
+        if armed.is_none() || !armed_allowed {
+            let _ = std::fs::remove_dir_all(&tmp);
+            skip("this codex does not widen writable_roots from config, so the pin is untestable");
+            return;
         }
 
         // Now the real assertion: a write outside the workspace is denied.
