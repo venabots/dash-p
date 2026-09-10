@@ -37,6 +37,10 @@ perms:
   read-only        os-sandbox
   workspace-write  os-sandbox
   full             none
+network (with --perms workspace-write):
+  none             os-sandbox
+  restricted       unsupported
+  full             none
 network-control: yes (sandbox blocks network)
 output-modes: text, json, stream-json
 ```
@@ -149,10 +153,85 @@ dash-p --harness claude --perms read-only --require-enforcement os-sandbox "…"
 # (exit 32)
 ```
 
-v1 is **report + passthrough**: it maps to native flags and reports the truth;
-it does not yet _add_ a sandbox to a harness that lacks one. `--network none`
-is OS-enforced only where the harness's sandbox already blocks network (codex
-read-only / workspace-write).
+It does not _add_ a sandbox to a harness that lacks one: where a harness has no
+mechanism, the tier is passed through and reported unenforced rather than
+faked.
+
+**The sandbox is pinned when it is the promise.** A codex sandbox is only a
+guarantee while the user's own `config.toml` cannot undo it, and it can, two
+ways — both observed here:
+
+- `approval_policy = "on-request"` with `approvals_reviewer = "auto_review"`
+  sends a sandbox denial to an approving reviewer, which re-runs the command
+  _outside_ the sandbox. A `--network none` run escalated and fetched HTTP 200.
+- `writable_roots = ["/Users/<you>"]` widened `workspace-write` enough to write
+  to `$HOME`.
+
+So whenever dash-p reports `os-sandbox` it also passes
+`-c approval_policy="never"` and `-c sandbox_workspace_write.writable_roots=[]`.
+That is exactly `--perms read-only|workspace-write` without a bypass. A bypass
+and `--perms full` remove the sandbox, and without `--perms` dash-p promises
+nothing, so those keep codex's own behavior untouched.
+
+The trade: under `--perms`, a sandboxed run can no longer escalate to install a
+dependency, and extra `writable_roots` from your config do not apply. That is
+what asking for a sandbox means. `--add-dir` still works — it is explicit caller
+intent, and it is forwarded to codex's own flag — so a run that genuinely needs a
+second writable root can still say so.
+
+**What `os-sandbox` covers, exactly.** It means codex's sandbox holds for the
+commands the agent runs: the filesystem boundary, the network switch, the
+writable roots, and the approval path that could undo any of them. Two things
+sit outside that boundary, and dash-p does not claim them:
+
+- **MCP servers.** Servers in your codex config run as codex's own subprocesses,
+  not under the command sandbox. A configured MCP server with network or
+  filesystem access is a path the seatbelt does not cover. Run with a
+  `CODEX_HOME` that has no MCP servers if that matters to you.
+- **`$TMPDIR`.** codex's workspace-write tier makes the temp dir writable by
+  design, and dash-p keeps that (pinning it off would break ordinary tool use).
+
+Neither is introduced by dash-p, but `os-sandbox` should be read as "codex's
+sandbox, held to the tier you asked for", not "nothing can reach out".
+
+### Network
+
+`--network` requests an egress tier the same way. Only codex can hold one, and
+only through its sandbox:
+
+| intent       | codex                                                          | claude / opencode |
+| ------------ | -------------------------------------------------------------- | ----------------- |
+| `none`       | `-c sandbox_workspace_write.network_access=false` (os-sandbox) | not enforced      |
+| `restricted` | rejected — no domain allowlist exists (exit 32)                | not enforced      |
+| `full`       | `-c sandbox_workspace_write.network_access=true`               | not enforced      |
+
+dash-p pins that switch explicitly whenever `--network` is passed, so the
+caller's intent beats a `[sandbox_workspace_write] network_access = true` in
+the user's own `~/.codex/config.toml`. Without the pin the sandbox stays on and
+keeps blocking the filesystem while the network is wide open — a run that
+_looks_ sandboxed but is not.
+
+Two combinations to know:
+
+- **`--perms read-only`** blocks network unconditionally (codex exposes the
+  switch only for workspace-write), so `--network full` there really runs with
+  no network. dash-p warns on stderr and records `network_effective: "none"`
+  rather than letting it pass silently.
+- **`--perms full`** and `--dangerously-skip-permissions` remove the sandbox
+  altogether, so no tier is held whatever was requested.
+
+`restricted` is rejected on codex instead of being quietly rounded to `none` or
+`full`. claude and opencode accept every tier without failing — callers pass one
+tier across mixed harnesses.
+
+**`network_effective` never claims more restriction than dash-p can prove.**
+When nothing enforces the tier, the run really does have an open network, so the
+envelope reports `network_effective: "full"` with `network_enforcement: "none"`
+— never an echo of the requested tier. So `--network none` on claude reports
+`full`/`none`, which is the truth, and dash-p warns on stderr. The same applies
+to codex without `--perms`: the sandbox mode then comes from codex's own config,
+which dash-p cannot confirm, so it claims nothing. Pass `--perms` to get a tier
+that is actually held.
 
 ## Output contract
 
@@ -163,8 +242,11 @@ read-only / workspace-write).
 
   ```json
   {
-    "harness": "claude", "drive": "print", "harness_version": null,
-    "model_requested": "opus", "model_resolved": "claude-opus-4-8",
+    "harness": "codex", "drive": "exec", "harness_version": "codex-cli 0.153.4",
+    "model_requested": "default", "model_resolved": "gpt-6-astra",
+    "perms": "workspace-write", "enforcement": "os-sandbox",
+    "network": "none", "network_effective": "none",
+    "network_enforcement": "os-sandbox",
     "duration_ms": 84213, "exit_status": "ok",
     "session_id": "…", "num_turns": 1, "total_cost_usd": 0.04,
     "usage": { "input_tokens": 1200, "output_tokens": 800, … }
@@ -173,6 +255,20 @@ read-only / workspace-write).
 
   `model_resolved` is read from the transcript (the launcher's truth), not the
   agent's self-report; it is `"unknown"` when the harness never exposed it.
+
+  The policy fields separate what was asked for from what was actually done:
+  `perms`/`network` are the requested tiers, `network_effective` is the tier
+  that really applied, and `enforcement`/`network_enforcement` are the classes
+  achieved — `os-sandbox`, `agent-policy`, or `none`. A caller can therefore
+  tell a real sandbox from a flag that did nothing. The two cases to branch on:
+
+  - `network_enforcement: "os-sandbox"` — the tier in `network_effective` is
+    genuinely held. It can be _stricter_ than requested (codex read-only blocks
+    egress whatever you asked for), and dash-p warns on stderr when it is.
+  - `network_enforcement: "none"` — nothing held the tier, so
+    `network_effective` reads `"full"`. Never an echo of the request.
+
+  All five are `null` when the tier was not requested.
   `drive` is adapter-provided — `"print"` (claude native), `"exec"` (codex), or
   `"pty"` for the `--pty` fallback (`"unknown"` when no adapter ran) — so a
   `"pty"` run's `unknown`/0 model+usage reads as a mode limitation, not missing

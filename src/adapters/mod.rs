@@ -23,7 +23,7 @@ use std::io::Write;
 
 use crate::args::Options;
 use crate::harness::Harness;
-use crate::policy::{Enforcement, Network, Perms};
+use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
 use crate::transcript::Summary;
 
 pub mod claude;
@@ -54,10 +54,19 @@ pub trait Adapter {
     /// reported honestly (an OS sandbox vs merely agent policy vs nothing).
     fn perms_enforcement(&self, perms: Perms) -> Enforcement;
 
-    /// The enforcement class for a network tier, given the permission tier in
-    /// effect (some harnesses gate network only via their sandbox, so it
-    /// depends on `perms`). `Full` network is never "enforced".
-    fn network_enforcement(&self, perms: Option<Perms>, network: Network) -> Enforcement;
+    /// The network tier that actually applies, and how strongly it is held.
+    ///
+    /// Depends on `perms` (some harnesses gate network only through their
+    /// sandbox) and on `bypass` (`--dangerously-skip-permissions` removes the
+    /// sandbox, and with it any network control). `Err(reason)` when the
+    /// harness cannot express the requested tier at all -- rejected with exit
+    /// 32 rather than silently downgraded to something else.
+    fn network_plan(
+        &self,
+        perms: Option<Perms>,
+        network: Network,
+        bypass: bool,
+    ) -> Result<NetworkPlan, String>;
 }
 
 /// Resolve a harness to the adapter that drives it. Returns `None` for a
@@ -83,14 +92,46 @@ pub fn for_harness(harness: &Harness, pty: bool) -> Option<Box<dyn Adapter>> {
     }
 }
 
+/// Resolve the requested `--network` tier against the harness: the tier that
+/// will actually apply and how strongly it is held. `Ok(None)` when no tier was
+/// requested; `Err` when the harness cannot express the requested one (exit 32).
+pub fn resolve_network(
+    adapter: &dyn Adapter,
+    opts: &Options,
+) -> Result<Option<NetworkPlan>, String> {
+    let Some(network) = opts.network else {
+        return Ok(None);
+    };
+    adapter
+        .network_plan(opts.perms, network, opts.skip_permissions)
+        .map(Some)
+        .map_err(|why| format!("{}: {why}", opts.harness.name()))
+}
+
 /// Verify the harness can meet a `--require-enforcement` demand for the
 /// requested perms/network tiers, *before* spawning anything. Returns an
-/// explanatory message (for exit 32) when it cannot.
-pub fn check_enforcement(adapter: &dyn Adapter, opts: &Options) -> Result<(), String> {
+/// explanatory message (for exit 32) when it cannot. `network` is the
+/// already-resolved plan from [`resolve_network`], so the demand is checked
+/// against the tier that will really apply rather than the one asked for.
+pub fn check_enforcement(
+    adapter: &dyn Adapter,
+    opts: &Options,
+    network: Option<NetworkPlan>,
+) -> Result<(), String> {
     let Some(req) = opts.require_enforcement else {
         return Ok(());
     };
     let harness = opts.harness.name();
+
+    // A requested tier with no resolved plan means the caller skipped
+    // `resolve_network`. Refuse rather than let a demanded network guarantee
+    // silently go unchecked -- this preflight is the guarantee.
+    if opts.network.is_some() && network.is_none() {
+        return Err(format!(
+            "{harness}: internal error -- --network was requested but not resolved; \
+             call resolve_network before check_enforcement"
+        ));
+    }
 
     // A bypass flag (`--dangerously-skip-permissions`) disables the harness's
     // sandbox/policy outright, so no enforcement is actually achieved regardless
@@ -115,16 +156,22 @@ pub fn check_enforcement(adapter: &dyn Adapter, opts: &Options) -> Result<(), St
         }
     }
 
-    if let Some(network) = opts.network {
-        let actual = adapter.network_enforcement(opts.perms, network);
-        if !req.satisfied_by(actual) {
-            return Err(format!(
-                "{harness} can only enforce network={} via {}, not {}",
-                network.label(),
-                actual.label(),
-                req.label(),
-            ));
-        }
+    if let (Some(requested), Some(plan)) = (opts.network, network)
+        && !req.satisfied_by(plan.enforcement)
+    {
+        // Name the effective tier too when it differs: "can only enforce
+        // network=full via none" is confusing when the run would really get
+        // no network at all.
+        let tier = if plan.effective == requested {
+            requested.label().to_string()
+        } else {
+            format!("{} (effectively {})", requested.label(), plan.effective.label())
+        };
+        return Err(format!(
+            "{harness} can only enforce network={tier} via {}, not {}",
+            plan.enforcement.label(),
+            req.label(),
+        ));
     }
 
     Ok(())
@@ -147,7 +194,8 @@ mod tests {
             ..Options::default()
         };
         let adapter = for_harness(&opts.harness, false).unwrap();
-        let err = check_enforcement(adapter.as_ref(), &opts).unwrap_err();
+        let network = resolve_network(adapter.as_ref(), &opts).unwrap();
+        let err = check_enforcement(adapter.as_ref(), &opts, network).unwrap_err();
         assert!(err.contains("dangerously-skip-permissions"), "got: {err}");
     }
 
@@ -160,7 +208,116 @@ mod tests {
             ..Options::default()
         };
         let adapter = for_harness(&opts.harness, false).unwrap();
-        assert!(check_enforcement(adapter.as_ref(), &opts).is_ok());
+        let network = resolve_network(adapter.as_ref(), &opts).unwrap();
+        assert!(check_enforcement(adapter.as_ref(), &opts, network).is_ok());
+    }
+
+    #[test]
+    fn resolve_network_is_none_when_unrequested() {
+        let opts = Options {
+            harness: crate::harness::Harness::Codex,
+            ..Options::default()
+        };
+        let adapter = for_harness(&opts.harness, false).unwrap();
+        assert_eq!(resolve_network(adapter.as_ref(), &opts).unwrap(), None);
+    }
+
+    #[test]
+    fn restricted_is_rejected_for_codex_but_accepted_elsewhere() {
+        // codex has no domain allowlist, so `restricted` is rejected rather
+        // than downgraded. claude/opencode take every tier (callers pass one
+        // tier across mixed harnesses) and report it unenforced.
+        let codex = Options {
+            harness: crate::harness::Harness::Codex,
+            network: Some(Network::Restricted),
+            ..Options::default()
+        };
+        let adapter = for_harness(&codex.harness, false).unwrap();
+        let err = resolve_network(adapter.as_ref(), &codex).unwrap_err();
+        assert!(err.starts_with("codex:"), "message names the harness: {err}");
+        assert!(err.contains("restricted"), "got: {err}");
+
+        for h in [crate::harness::Harness::Claude, crate::harness::Harness::Opencode] {
+            let opts = Options {
+                harness: h.clone(),
+                network: Some(Network::Restricted),
+                ..Options::default()
+            };
+            let adapter = for_harness(&h, false).unwrap();
+            let plan = resolve_network(adapter.as_ref(), &opts).unwrap().unwrap();
+            // Accepted, but nothing holds it, so the reported reality is an
+            // open network rather than an echo of "restricted".
+            assert_eq!(plan.effective, Network::Full);
+            assert_eq!(plan.enforcement, Enforcement::Unenforced);
+        }
+    }
+
+    #[test]
+    fn require_enforcement_rejects_an_unenforced_network_tier() {
+        // claude cannot enforce any network tier, so demanding one must fail
+        // preflight rather than run with a flag that does nothing.
+        let opts = Options {
+            harness: crate::harness::Harness::Claude,
+            network: Some(Network::None),
+            require_enforcement: Some(RequireEnforcement::Any),
+            ..Options::default()
+        };
+        let adapter = for_harness(&opts.harness, false).unwrap();
+        let network = resolve_network(adapter.as_ref(), &opts).unwrap();
+        let err = check_enforcement(adapter.as_ref(), &opts, network).unwrap_err();
+        assert!(err.contains("network=none"), "got: {err}");
+    }
+
+    #[test]
+    fn a_downgrade_to_a_stricter_tier_still_runs() {
+        // codex read-only blocks network unconditionally, so `--network full`
+        // is really `none`. That is stricter than asked for, so it satisfies an
+        // enforcement demand and the run proceeds; the envelope carries the
+        // downgrade, not a failure.
+        let opts = Options {
+            harness: crate::harness::Harness::Codex,
+            perms: Some(Perms::ReadOnly),
+            network: Some(Network::Full),
+            require_enforcement: Some(RequireEnforcement::Any),
+            ..Options::default()
+        };
+        let adapter = for_harness(&opts.harness, false).unwrap();
+        let network = resolve_network(adapter.as_ref(), &opts).unwrap().unwrap();
+        assert_eq!(network.effective, Network::None);
+        assert!(check_enforcement(adapter.as_ref(), &opts, Some(network)).is_ok());
+    }
+
+    #[test]
+    fn rejection_names_the_effective_tier_when_it_differs() {
+        // claude leaves the network open, so `--network none` there is really
+        // `full`. The rejection must name both tiers -- "can only enforce
+        // network=none via none" hides that the run would have had a network.
+        let opts = Options {
+            harness: crate::harness::Harness::Claude,
+            network: Some(Network::None),
+            require_enforcement: Some(RequireEnforcement::Any),
+            ..Options::default()
+        };
+        let adapter = for_harness(&opts.harness, false).unwrap();
+        let network = resolve_network(adapter.as_ref(), &opts).unwrap();
+        let err = check_enforcement(adapter.as_ref(), &opts, network).unwrap_err();
+        assert!(err.contains("network=none (effectively full)"), "got: {err}");
+    }
+
+    #[test]
+    fn an_unresolved_network_request_is_refused_not_skipped() {
+        // Passing `None` while `opts.network` is set means the caller skipped
+        // resolve_network. Silently dropping the demand would lose the
+        // guarantee this preflight exists to provide.
+        let opts = Options {
+            harness: crate::harness::Harness::Codex,
+            network: Some(Network::None),
+            require_enforcement: Some(RequireEnforcement::Any),
+            ..Options::default()
+        };
+        let adapter = for_harness(&opts.harness, false).unwrap();
+        let err = check_enforcement(adapter.as_ref(), &opts, None).unwrap_err();
+        assert!(err.contains("not resolved"), "got: {err}");
     }
 
     #[test]

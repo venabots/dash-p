@@ -11,7 +11,7 @@ use std::io::Write;
 use crate::adapters::{self, Adapter};
 use crate::args::{self, ArgError, Options};
 use crate::harness::{Harness, KNOWN_NAMES};
-use crate::policy::{Network, Perms};
+use crate::policy::{Enforcement, Network, Perms};
 
 pub enum Command {
     Run(Box<Options>),
@@ -72,6 +72,11 @@ Run options:
       --output-format <fmt>   text (default) | json ({answer,metadata}) | stream-json
       --perms <tier>          read-only | workspace-write | full   (permission tier, by intent)
       --network <tier>        none | restricted | full             (network tier, by intent)
+                              codex always rejects 'restricted' (no domain allowlist).
+                              With --perms workspace-write it blocks 'none' and opens
+                              'full' (os-sandbox); --perms read-only blocks every tier.
+                              Without --perms, and on claude/opencode, 'none'/'full'
+                              are accepted but not enforced. See `capabilities`.
       --require-enforcement <class>   os-sandbox | any   (else exit 32 before running)
       --meta-file <path>      write the authoritative run-metadata envelope here
       --cwd <path>            working directory for the agent
@@ -128,6 +133,7 @@ fn harness_flag(rest: &[String]) -> Result<Option<Harness>, ArgError> {
 }
 
 const PERM_TIERS: [Perms; 3] = [Perms::ReadOnly, Perms::WorkspaceWrite, Perms::Full];
+const NETWORK_TIERS: [Network; 3] = [Network::None, Network::Restricted, Network::Full];
 
 /// `list harnesses`: every recognised harness, whether it has an adapter, and
 /// whether its binary is installed (with version).
@@ -215,12 +221,32 @@ fn render_capabilities(w: &mut dyn Write, h: &Harness, adapter: &dyn Adapter) ->
     for p in PERM_TIERS {
         writeln!(w, "  {:<16} {}", p.label(), adapter.perms_enforcement(p).label())?;
     }
-    // Network control: does any sandboxed tier OS-enforce "no network"?
-    let net = adapter.network_enforcement(Some(Perms::WorkspaceWrite), Network::None);
-    let net_label = if net == crate::policy::Enforcement::OsSandbox {
+    // Report the network tiers at workspace-write: harnesses that gate network
+    // through their sandbox give it the most control there, so this is the best
+    // case rather than a flattering average. The heading names the tier so the
+    // dependency is not hidden.
+    writeln!(w, "network (with --perms workspace-write):")?;
+    let mut sandboxed = false;
+    for n in NETWORK_TIERS {
+        match adapter.network_plan(Some(Perms::WorkspaceWrite), n, false) {
+            Ok(plan) => {
+                sandboxed |= plan.enforcement == Enforcement::OsSandbox;
+                // Name the effective tier whenever it differs from the request,
+                // so a downgrade is visible here and not only after a run.
+                let effective = if plan.effective == n {
+                    String::new()
+                } else {
+                    format!("  (effective: {})", plan.effective.label())
+                };
+                writeln!(w, "  {:<16} {}{}", n.label(), plan.enforcement.label(), effective)?;
+            }
+            Err(_) => writeln!(w, "  {:<16} unsupported", n.label())?,
+        }
+    }
+    let net_label = if sandboxed {
         "yes (sandbox blocks network)"
     } else {
-        "no"
+        "no (--network is accepted but never enforced)"
     };
     writeln!(w, "network-control: {net_label}")?;
     writeln!(w, "output-modes: text, json, stream-json")?;
@@ -288,6 +314,47 @@ mod tests {
     fn list_without_target_errs() {
         assert!(matches!(parse(&v(&["list"])), Err(ArgError::Usage(_))));
         assert!(matches!(parse(&v(&["list", "bogus"])), Err(ArgError::Usage(_))));
+    }
+
+    fn caps_for(h: Harness) -> String {
+        let mut buf = Vec::new();
+        capabilities(&mut buf, Some(h)).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn capabilities_report_the_real_codex_network_map() {
+        // The advertised map has to match what the sandbox actually does:
+        // `none` is a real block, `restricted` has no codex equivalent, and
+        // `full` restricts nothing.
+        let out = caps_for(Harness::Codex);
+        // Assert against the network block alone. `full  none` also appears in
+        // the perms block, so a whole-output match would pass even if the
+        // network section lost its `full` row.
+        let (_, net) = out
+            .split_once("network (with --perms workspace-write):")
+            .unwrap_or_else(|| panic!("no network block: {out}"));
+        assert!(net.contains("none             os-sandbox"), "{net}");
+        assert!(net.contains("restricted       unsupported"), "{net}");
+        assert!(net.contains("full             none"), "{net}");
+        assert!(out.contains("network-control: yes (sandbox blocks network)"), "{out}");
+    }
+
+    #[test]
+    fn capabilities_admit_harnesses_that_never_enforce_network() {
+        // claude and opencode accept --network and do nothing with it. Saying
+        // only "no" left a caller guessing whether the flag was even read.
+        for h in [Harness::Claude, Harness::Opencode] {
+            let out = caps_for(h.clone());
+            assert!(
+                out.contains("network-control: no (--network is accepted but never enforced)"),
+                "{}: {out}",
+                h.name()
+            );
+            for tier in ["none", "restricted", "full"] {
+                assert!(out.contains(&format!("  {tier:<16} none")), "{}: {out}", h.name());
+            }
+        }
     }
 
     #[test]

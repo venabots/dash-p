@@ -103,8 +103,10 @@ mod tests {
     fn answer_json_wraps_answer_and_metadata() {
         use crate::args::Options;
         use crate::meta::{ExitStatus, Metadata};
+        use crate::policy::Enforced;
         let s = summary();
-        let metadata = Metadata::build(&Options::default(), Some(&s), 50, ExitStatus::Ok, None, "print");
+        let metadata =
+            Metadata::build(&Options::default(), Some(&s), 50, ExitStatus::Ok, Enforced::default(), "print");
         let mut buf = Vec::new();
         emit_answer_json(&mut buf, &s, &metadata).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();

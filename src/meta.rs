@@ -8,7 +8,7 @@
 //! echo of the request pretending to be the resolved value.
 
 use crate::args::Options;
-use crate::policy::Enforcement;
+use crate::policy::Enforced;
 use crate::transcript::Summary;
 
 /// The terminal status of a run, mapped to a stable exit code and label. The
@@ -81,6 +81,13 @@ pub struct Metadata {
     pub enforcement: Option<String>,
     /// Requested network tier (`--network`), or `None`.
     pub network: Option<String>,
+    /// The network tier that actually applied. Differs from `network` when the
+    /// harness could not give the requested tier -- codex's read-only sandbox
+    /// blocks network unconditionally, so a `full` request really runs `none`.
+    pub network_effective: Option<String>,
+    /// Enforcement class of `network_effective`, so a caller can tell a real
+    /// sandbox (`os-sandbox`) from a flag that did nothing (`none`).
+    pub network_enforcement: Option<String>,
     pub duration_ms: u64,
     pub exit_status: ExitStatus,
     pub session_id: String,
@@ -97,7 +104,7 @@ impl Metadata {
         summary: Option<&Summary>,
         duration_ms: u64,
         exit_status: ExitStatus,
-        enforcement: Option<Enforcement>,
+        enforced: Enforced,
         drive: &'static str,
     ) -> Self {
         let model_requested = opts.model.clone().unwrap_or_else(|| "default".to_string());
@@ -113,8 +120,14 @@ impl Metadata {
             model_requested,
             model_resolved,
             perms: opts.perms.map(|p| p.label().to_string()),
-            enforcement: enforcement.map(|e| e.label().to_string()),
+            enforcement: enforced.perms.map(|e| e.label().to_string()),
             network: opts.network.map(|n| n.label().to_string()),
+            network_effective: enforced
+                .network
+                .map(|p| p.effective.label().to_string()),
+            network_enforcement: enforced
+                .network
+                .map(|p| p.enforcement.label().to_string()),
             duration_ms,
             exit_status,
             session_id: summary.map(|s| s.session_id.clone()).unwrap_or_default(),
@@ -134,6 +147,8 @@ impl Metadata {
             "perms": self.perms,
             "enforcement": self.enforcement,
             "network": self.network,
+            "network_effective": self.network_effective,
+            "network_enforcement": self.network_enforcement,
             "duration_ms": self.duration_ms,
             "exit_status": self.exit_status.label(),
             "session_id": self.session_id,
@@ -190,7 +205,7 @@ mod tests {
             model: Some("opus".into()),
             ..Options::default()
         };
-        let m = Metadata::build(&opts, Some(&summary()), 100, ExitStatus::Ok, None, "print");
+        let m = Metadata::build(&opts, Some(&summary()), 100, ExitStatus::Ok, Enforced::default(), "print");
         assert_eq!(m.model_requested, "opus");
         assert_eq!(m.model_resolved, "claude-opus-4-8");
         assert_eq!(m.to_json()["exit_status"], "ok");
@@ -199,22 +214,22 @@ mod tests {
 
     #[test]
     fn drive_is_passed_through() {
-        let m = Metadata::build(&Options::default(), Some(&summary()), 1, ExitStatus::Ok, None, "print");
+        let m = Metadata::build(&Options::default(), Some(&summary()), 1, ExitStatus::Ok, Enforced::default(), "print");
         assert_eq!(m.to_json()["drive"], "print");
 
-        let m = Metadata::build(&Options::default(), Some(&summary()), 1, ExitStatus::Ok, None, "pty");
+        let m = Metadata::build(&Options::default(), Some(&summary()), 1, ExitStatus::Ok, Enforced::default(), "pty");
         assert_eq!(m.to_json()["drive"], "pty");
     }
 
     #[test]
     fn requested_default_when_unspecified() {
-        let m = Metadata::build(&Options::default(), Some(&summary()), 1, ExitStatus::Ok, None, "print");
+        let m = Metadata::build(&Options::default(), Some(&summary()), 1, ExitStatus::Ok, Enforced::default(), "print");
         assert_eq!(m.model_requested, "default");
     }
 
     #[test]
     fn policy_fields_reflect_request_and_enforcement() {
-        use crate::policy::{Enforcement, Network, Perms};
+        use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
         let opts = Options {
             perms: Some(Perms::ReadOnly),
             network: Some(Network::None),
@@ -225,30 +240,93 @@ mod tests {
             Some(&summary()),
             1,
             ExitStatus::Ok,
-            Some(Enforcement::AgentPolicy),
+            Enforced {
+                perms: Some(Enforcement::AgentPolicy),
+                network: Some(NetworkPlan::os_sandbox(Network::None)),
+            },
             "print",
         );
         let j = m.to_json();
         assert_eq!(j["perms"], "read-only");
         assert_eq!(j["enforcement"], "agent-policy");
         assert_eq!(j["network"], "none");
+        assert_eq!(j["network_effective"], "none");
+        assert_eq!(j["network_enforcement"], "os-sandbox");
 
         // Unset policy fields serialize as null.
-        let m = Metadata::build(&Options::default(), Some(&summary()), 1, ExitStatus::Ok, None, "print");
+        let m = Metadata::build(&Options::default(), Some(&summary()), 1, ExitStatus::Ok, Enforced::default(), "print");
         assert!(m.to_json()["perms"].is_null());
         assert!(m.to_json()["enforcement"].is_null());
+        assert!(m.to_json()["network_effective"].is_null());
+        assert!(m.to_json()["network_enforcement"].is_null());
+    }
+
+    #[test]
+    fn envelope_separates_requested_from_effective_network() {
+        // The case a caller cannot otherwise detect: `--network full` under
+        // codex's read-only sandbox really runs with no network at all. The
+        // request and the reality must both be on the record.
+        use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
+        let opts = Options {
+            perms: Some(Perms::ReadOnly),
+            network: Some(Network::Full),
+            ..Options::default()
+        };
+        let j = Metadata::build(
+            &opts,
+            Some(&summary()),
+            1,
+            ExitStatus::Ok,
+            Enforced {
+                perms: Some(Enforcement::OsSandbox),
+                network: Some(NetworkPlan::os_sandbox(Network::None)),
+            },
+            "exec",
+        )
+        .to_json();
+        assert_eq!(j["network"], "full");
+        assert_eq!(j["network_effective"], "none");
+        assert_eq!(j["network_enforcement"], "os-sandbox");
+    }
+
+    #[test]
+    fn envelope_marks_an_unenforced_tier_as_a_no_op() {
+        // claude/opencode accept --network but enforce nothing. The envelope has
+        // to say so, or a caller cannot tell a real sandbox from a no-op flag.
+        use crate::policy::{Network, NetworkPlan};
+        let opts = Options {
+            network: Some(Network::None),
+            ..Options::default()
+        };
+        let j = Metadata::build(
+            &opts,
+            Some(&summary()),
+            1,
+            ExitStatus::Ok,
+            Enforced {
+                perms: None,
+                network: Some(NetworkPlan::open()),
+            },
+            "print",
+        )
+        .to_json();
+        // Requested none, but nothing held it, so the run really had an open
+        // network. Echoing "none" back here would read like a real block.
+        assert_eq!(j["network"], "none");
+        assert_eq!(j["network_effective"], "full");
+        assert_eq!(j["network_enforcement"], "none");
     }
 
     #[test]
     fn resolved_unknown_without_summary_or_model() {
         // No summary at all (failed run).
-        let m = Metadata::build(&Options::default(), None, 1, ExitStatus::Timeout, None, "print");
+        let m = Metadata::build(&Options::default(), None, 1, ExitStatus::Timeout, Enforced::default(), "print");
         assert_eq!(m.model_resolved, "unknown");
 
         // Summary present but transcript never exposed the model.
         let mut s = summary();
         s.model = String::new();
-        let m = Metadata::build(&Options::default(), Some(&s), 1, ExitStatus::Ok, None, "print");
+        let m = Metadata::build(&Options::default(), Some(&s), 1, ExitStatus::Ok, Enforced::default(), "print");
         assert_eq!(m.model_resolved, "unknown");
     }
 }
