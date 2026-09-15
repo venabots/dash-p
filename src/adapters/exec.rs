@@ -112,9 +112,12 @@ pub fn run_jsonl(
 
     let mut replay = String::new();
     loop {
+        // The reader is not joined on this path. A tool descendant that left
+        // the process group can keep the stdout pipe open after tear-down, and
+        // a join would then wait for it -- the same reason the stderr reader
+        // is never joined.
         if let Some(err) = stop_reason(start, timeout) {
             tear_down(&mut child);
-            let _ = reader.join();
             return Err(err);
         }
         match rx.recv_timeout(POLL) {
@@ -299,6 +302,18 @@ mod tests {
         let err = run_jsonl(sh("sleep 5"), None, &short, None, |_| {}).err().unwrap();
         assert!(matches!(err, DriverError::StopTimeout), "got: {err}");
         assert!(started.elapsed() < Duration::from_secs(3), "the child was not killed");
+    }
+
+    #[test]
+    fn a_descendant_outside_the_group_cannot_hold_the_timeout_open() {
+        // The perl process leaves the child's process group, so tear-down does
+        // not kill it, and it keeps the stdout pipe open for 5 s.
+        let short = Options { timeout_ms: 300, ..Options::default() };
+        let script = "perl -MPOSIX -e 'POSIX::setsid(); sleep 5' & sleep 5";
+        let started = Instant::now();
+        let err = run_jsonl(sh(script), None, &short, None, |_| {}).err().unwrap();
+        assert!(matches!(err, DriverError::StopTimeout), "got: {err}");
+        assert!(started.elapsed() < Duration::from_secs(3), "the stdout reader held the run open");
     }
 
     #[test]
