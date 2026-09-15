@@ -92,6 +92,17 @@ fn perform(agent: &Agent, request: HttpRequest) -> Outcome {
             .call(),
     };
     match result {
+        Ok(response) if response.status().is_redirection() => {
+            let status = response.status().as_u16();
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("an unnamed location");
+            Outcome::Failed(format!(
+                "{status} redirect to {location}; dash-p does not follow redirects, so use the final URL as --base-url"
+            ))
+        }
         Ok(mut response) => {
             let status = response.status().as_u16();
             match response.body_mut().read_to_string() {
@@ -176,6 +187,7 @@ pub mod tests {
         // `x-api-key` is not a header ureq strips on a redirect, so following
         // one would send the key to whatever host the Location names.
         let (elsewhere, leaked) = serve_once(200, "{}");
+        let elsewhere_url = format!("{elsewhere}/v1/x");
         let (base, _) = serve_raw(move || {
             format!("HTTP/1.1 307 X\r\nlocation: {elsewhere}/v1/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
         });
@@ -185,7 +197,8 @@ pub mod tests {
             body: Some("{}".into()),
         };
         let out = send(request, &opts(5_000)).unwrap();
-        assert!(matches!(out, Outcome::Response { status: 307, .. }), "{out:?}");
+        let Outcome::Failed(why) = out else { panic!("a redirect must be a failure: {out:?}") };
+        assert!(why.contains("307") && why.contains(&elsewhere_url) && why.contains("--base-url"), "{why}");
         assert!(leaked.recv_timeout(Duration::from_millis(300)).is_err(), "the redirect was followed");
     }
 
