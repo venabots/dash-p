@@ -84,6 +84,10 @@ its key with `--api-key-env`:
 | `openai-api`    | `https://api.openai.com/v1` | `OPENAI_API_KEY` (bearer; any value for a keyless local server) |
 
 An API harness has **no default model**: pass `--model`, or the run exits 31.
+`--max-tokens` is required by the Anthropic format, so `anthropic-api` sends
+16000 when it is not set. `openai-api` sends it only when set: as
+`max_completion_tokens` to api.openai.com, and as `max_tokens` to any other
+host, because compatible servers such as Ollama read only that field.
 `list models -H <api-harness>` asks the provider which models your key can use,
 and takes the same `--base-url` and `--api-key-env`. A key the provider echoes
 back in an error is printed as `[redacted]`, and redirects are not followed, so
