@@ -308,9 +308,13 @@ fn outcome(reply: Reply, replay: String, api_ms: u64, start: Instant) -> RunOutc
     }
 }
 
+/// Shorter values are placeholders for keyless servers ("x", "ollama"), not
+/// secrets, and replacing them would cut them out of ordinary words.
+const MIN_SECRET_LEN: usize = 8;
+
 /// `text` with every copy of the credential replaced.
 fn redact(text: &str, credential: &Credential) -> String {
-    if credential.value.is_empty() {
+    if credential.value.len() < MIN_SECRET_LEN {
         return text.to_string();
     }
     text.replace(&credential.value, "[redacted]")
@@ -455,6 +459,16 @@ mod tests {
             assert!(!text.contains("sk-test-echoed"), "the key leaked: {text}");
         }
         assert!(out.summary.final_text.contains("[redacted]"), "{}", out.summary.final_text);
+    }
+
+    #[test]
+    fn a_short_placeholder_key_is_not_redacted_out_of_the_text() {
+        // Keyless local servers take any value, often one letter. Redacting
+        // that would cut the letter out of every word of the answer.
+        let placeholder = Credential::bearer("OPENAI_API_KEY", "k".into());
+        assert_eq!(redact("model fake-missing not found", &placeholder), "model fake-missing not found");
+        let real = Credential::api_key("ANTHROPIC_API_KEY", "sk-ant-0123456789".into());
+        assert_eq!(redact("bad key sk-ant-0123456789", &real), "bad key [redacted]");
     }
 
     #[test]
