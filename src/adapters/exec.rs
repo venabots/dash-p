@@ -57,7 +57,10 @@ fn streaming(opts: &Options, stream_out: &Option<&mut (dyn Write + '_)>) -> bool
 /// to `stream_out` as it arrives.
 ///
 /// The child leads its own process group, so an interrupt or timeout tears
-/// down the tools it spawned too, not only the top-level process.
+/// down the tools it spawned too, not only the top-level process. A tool the
+/// harness starts in its own session (pi's bash tool does) is outside that
+/// group: its clean-up depends on the harness's own SIGTERM handler, which gets
+/// the short grace period in `procgroup::terminate_group` before SIGKILL.
 pub fn run_jsonl(
     mut cmd: Command,
     stdin: Option<String>,

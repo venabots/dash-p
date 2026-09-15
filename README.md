@@ -63,7 +63,8 @@ today:
   because pi reads any argument that starts with `@` as a file to attach. Usage
   and cost come from pi's own events. `model_resolved` is `provider/model`: the
   model the provider reported when pi relays it, else the model id pi sent. A
-  failed call reports `unknown`, unless the provider already reported its model.
+  failed call counts only a model the provider reported, so a run whose only
+  call failed before that reports `unknown`.
   Usage includes the model calls that compaction and tools make. pi has no
   sandbox, so `--perms read-only` is `agent-policy` at best — see Permissions.
 
