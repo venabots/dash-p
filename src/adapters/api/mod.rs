@@ -252,16 +252,19 @@ fn run(
     });
     let url = request.url.clone();
     let sent = Instant::now();
+    // A provider can echo the key back, in an error or in any field. The raw
+    // body is redacted before anything reads or cuts it, so no output carries
+    // the key: not the answer, the envelope, the replay, or stream-json.
     let (reply, replay) = match http::send(request, opts)? {
-        http::Outcome::Response { status, body } => (protocol.parse_reply(status, &body), one_line(&body)),
+        http::Outcome::Response { status, body } => {
+            let body = redact(&body, &credential);
+            (protocol.parse_reply(status, &body), one_line(&body))
+        }
         http::Outcome::Failed(why) => {
+            let why = redact(&why, &credential);
             (Reply::failure(format!("{harness}: request to {url} failed: {why}")), String::new())
         }
     };
-    // A provider can echo the key back in an error. Nothing dash-p prints may
-    // carry it: not the answer, not the replay, not stream-json.
-    let reply = Reply { text: redact(&reply.text, &credential), ..reply };
-    let replay = redact(&replay, &credential);
     let api_ms = sent.elapsed().as_millis() as u64;
 
     if opts.output_format == OutputFormat::StreamJson
@@ -308,16 +311,24 @@ fn outcome(reply: Reply, replay: String, api_ms: u64, start: Instant) -> RunOutc
     }
 }
 
-/// Shorter values are placeholders for keyless servers ("x", "ollama"), not
-/// secrets, and replacing them would cut them out of ordinary words.
-const MIN_SECRET_LEN: usize = 8;
+/// Shorter values are placeholders for keyless servers ("x", "ollama",
+/// "sk-no-key-required"), not secrets, and replacing them would cut them out of
+/// ordinary words. Real provider keys are 35 characters or more.
+const MIN_SECRET_LEN: usize = 20;
 
-/// `text` with every copy of the credential replaced.
+/// `text` with every copy of the credential replaced: as sent, as a JSON
+/// string would escape it, and with `/` escaped as `\/`, which JSON allows.
 fn redact(text: &str, credential: &Credential) -> String {
-    if credential.value.len() < MIN_SECRET_LEN {
+    let secret = credential.value.as_str();
+    if secret.len() < MIN_SECRET_LEN {
         return text.to_string();
     }
-    text.replace(&credential.value, "[redacted]")
+    let quoted = Value::String(secret.to_string()).to_string();
+    let escaped = quoted[1..quoted.len() - 1].to_string();
+    let slash_escaped = escaped.replace('/', "\\/");
+    [secret.to_string(), escaped, slash_escaped]
+        .iter()
+        .fold(text.to_string(), |out, form| out.replace(form.as_str(), "[redacted]"))
 }
 
 /// The response body as one JSONL line: compact JSON when it parses, else the
@@ -370,9 +381,17 @@ fn list_models_with(
 ) -> Result<Vec<String>, String> {
     let credential = protocol.credential(api_key_env, env)?;
     let base_url = base_url(protocol, base_url_flag, env);
-    http::get(protocol.models_request(&base_url, &credential))
-        .and_then(|body| protocol.parse_models(&body))
-        .map_err(|why| redact(&why, &credential))
+    match http::get(protocol.models_request(&base_url, &credential)) {
+        http::Outcome::Response { status, body } => {
+            let body = redact(&body, &credential);
+            if (200..300).contains(&status) {
+                protocol.parse_models(&body)
+            } else {
+                Err(format!("{status}: {}", excerpt(&body)))
+            }
+        }
+        http::Outcome::Failed(why) => Err(redact(&why, &credential)),
+    }
 }
 
 #[cfg(test)]
@@ -449,26 +468,49 @@ mod tests {
 
     #[test]
     fn a_key_the_provider_echoes_back_never_reaches_the_output() {
-        let (base, _) = serve_once(401, r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key: sk-test-echoed"}}"#);
-        let env = env_with(vec![(anthropic::API_KEY_ENV, "sk-test-echoed".into())]);
+        let (base, _) = serve_once(401, r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key: sk-test-echoed-0123456789"}}"#);
+        let env = env_with(vec![(anthropic::API_KEY_ENV, "sk-test-echoed-0123456789".into())]);
         let o = Options { output_format: OutputFormat::StreamJson, ..opts(&base) };
         let mut buf = Vec::new();
         let out = run(Protocol::Anthropic, &o, &env, Some(&mut buf)).unwrap();
         let streamed = String::from_utf8(buf).unwrap();
         for text in [&out.summary.final_text, &out.summary.jsonl_replay, &streamed] {
-            assert!(!text.contains("sk-test-echoed"), "the key leaked: {text}");
+            assert!(!text.contains("sk-test-echoed-0123456789"), "the key leaked: {text}");
         }
         assert!(out.summary.final_text.contains("[redacted]"), "{}", out.summary.final_text);
     }
 
     #[test]
     fn a_short_placeholder_key_is_not_redacted_out_of_the_text() {
-        // Keyless local servers take any value, often one letter. Redacting
-        // that would cut the letter out of every word of the answer.
-        let placeholder = Credential::bearer("OPENAI_API_KEY", "k".into());
-        assert_eq!(redact("model fake-missing not found", &placeholder), "model fake-missing not found");
-        let real = Credential::api_key("ANTHROPIC_API_KEY", "sk-ant-0123456789".into());
-        assert_eq!(redact("bad key sk-ant-0123456789", &real), "bad key [redacted]");
+        // Keyless local servers take any value: one letter, "ollama", or
+        // "sk-no-key-required". Redacting that would cut it out of the answer.
+        for placeholder in ["k", "ollama", "lm-studio", "sk-no-key-required"] {
+            let c = Credential::bearer("OPENAI_API_KEY", placeholder.into());
+            let text = format!("use {placeholder} with ollama and lm-studio");
+            assert_eq!(redact(&text, &c), text, "{placeholder}");
+        }
+        let real = Credential::api_key("ANTHROPIC_API_KEY", "sk-ant-api03-0123456789abcdef".into());
+        assert_eq!(redact("bad key sk-ant-api03-0123456789abcdef", &real), "bad key [redacted]");
+    }
+
+    #[test]
+    fn an_echoed_key_is_redacted_before_the_body_is_cut_or_parsed() {
+        const KEY: &str = "sk-ant-api03/0123456789abcdefghij";
+        let env = env_with(vec![(anthropic::API_KEY_ENV, KEY.into())]);
+
+        // Across the 500-character excerpt cut of a non-JSON body.
+        let long: &'static str = Box::leak(format!("{}x-api-key: {KEY}", "x".repeat(480)).into_boxed_str());
+        let (base, _) = serve_once(502, long);
+        let out = run(Protocol::Anthropic, &opts(&base), &env, None).unwrap();
+        assert!(!out.summary.final_text.contains("sk-ant-api03"), "{}", out.summary.final_text);
+
+        // JSON-escaped, and in the fields the envelope copies (id, model).
+        let body = r#"{"id":"sk-ant-api03\/0123456789abcdefghij","model":"sk-ant-api03/0123456789abcdefghij","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"#;
+        let (base, _) = serve_once(200, body);
+        let out = run(Protocol::Anthropic, &opts(&base), &env, None).unwrap();
+        for field in [&out.summary.session_id, &out.summary.model, &out.summary.jsonl_replay] {
+            assert!(!field.contains("0123456789abcdefghij"), "the key leaked: {field}");
+        }
     }
 
     #[test]

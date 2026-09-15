@@ -59,13 +59,9 @@ pub fn send(request: HttpRequest, opts: &Options) -> Result<Outcome, DriverError
     }
 }
 
-/// A blocking GET for a discovery command. Any status outside 2xx is an error.
-pub fn get(request: HttpRequest) -> Result<String, String> {
-    match perform(&agent(LIST_TIMEOUT), request) {
-        Outcome::Response { status, body } if (200..300).contains(&status) => Ok(body),
-        Outcome::Response { status, body } => Err(format!("{status}: {}", super::excerpt(&body))),
-        Outcome::Failed(why) => Err(why),
-    }
+/// A blocking GET for a discovery command, which has no `--timeout`.
+pub fn get(request: HttpRequest) -> Outcome {
+    perform(&agent(LIST_TIMEOUT), request)
 }
 
 /// An agent that returns every status as a response: the error body is what
@@ -221,10 +217,9 @@ pub mod tests {
     }
 
     #[test]
-    fn get_turns_a_non_2xx_status_into_an_error() {
+    fn get_returns_any_status_with_its_body() {
         let (base, _) = serve_once(401, r#"{"error":"bad key"}"#);
         let request = HttpRequest { url: base, headers: vec![], body: None };
-        let err = get(request).unwrap_err();
-        assert!(err.starts_with("401: "), "{err}");
+        assert_eq!(get(request), Outcome::Response { status: 401, body: r#"{"error":"bad key"}"#.into() });
     }
 }
