@@ -145,6 +145,14 @@ fn run(mut opts: Options) -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // `--cwd` and `--pty` shape a subprocess. Orchestrators pass `--cwd` to
+    // every harness, so an API run warns rather than refuses.
+    if opts.harness.is_api() && (opts.cwd.is_some() || opts.pty) {
+        eprintln!(
+            "dash-p: the '{}' harness makes one HTTP call; --cwd and --pty have no effect, and the model cannot see files",
+            opts.harness.name()
+        );
+    }
     // The reverse: flags meant for an agent CLI mean nothing to an API call.
     let cli_flags = adapters::api::unsupported_flags(&opts);
     if opts.harness.is_api() && !cli_flags.is_empty() {
