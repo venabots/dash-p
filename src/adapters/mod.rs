@@ -70,6 +70,22 @@ pub trait Adapter {
         network: Network,
         bypass: bool,
     ) -> Result<NetworkPlan, String>;
+
+    /// Whether the model gets tools at all. A bypass flag switches off a
+    /// sandbox or a policy; a harness with no tools has neither to lose.
+    fn has_tools(&self) -> bool {
+        true
+    }
+}
+
+/// The enforcement class a run really gets for `perms`: the adapter's class,
+/// unless a bypass flag removed it.
+pub fn perms_achieved(adapter: &dyn Adapter, perms: Perms, bypass: bool) -> Enforcement {
+    if bypass && adapter.has_tools() {
+        Enforcement::Unenforced
+    } else {
+        adapter.perms_enforcement(perms)
+    }
 }
 
 /// Resolve a harness to the adapter that drives it. Returns `None` for a
@@ -142,7 +158,7 @@ pub fn check_enforcement(
     // A bypass flag (`--dangerously-skip-permissions`) disables the harness's
     // sandbox/policy outright, so no enforcement is actually achieved regardless
     // of the requested tier. Reflect that here rather than trusting the tier map.
-    if opts.skip_permissions {
+    if opts.skip_permissions && adapter.has_tools() {
         return Err(format!(
             "{harness} cannot meet --require-enforcement {}: \
              --dangerously-skip-permissions bypasses all enforcement",
@@ -203,6 +219,28 @@ mod tests {
         let network = resolve_network(adapter.as_ref(), &opts).unwrap();
         let err = check_enforcement(adapter.as_ref(), &opts, network).unwrap_err();
         assert!(err.contains("dangerously-skip-permissions"), "got: {err}");
+    }
+
+    #[test]
+    fn a_bypass_removes_nothing_from_a_harness_with_no_tools() {
+        // There is no sandbox or policy to switch off, so a caller that passes
+        // one flag set to every harness must not lose the no-tools guarantee.
+        let opts = Options {
+            harness: crate::harness::Harness::AnthropicApi,
+            perms: Some(Perms::Full),
+            network: Some(Network::Full),
+            require_enforcement: Some(RequireEnforcement::OsSandbox),
+            skip_permissions: true,
+            ..Options::default()
+        };
+        let api = for_harness(&opts.harness, false).unwrap();
+        let network = resolve_network(api.as_ref(), &opts).unwrap();
+        assert!(check_enforcement(api.as_ref(), &opts, network).is_ok());
+        assert_eq!(perms_achieved(api.as_ref(), Perms::Full, true), Enforcement::NoTools);
+
+        let codex = for_harness(&crate::harness::Harness::Codex, false).unwrap();
+        assert_eq!(perms_achieved(codex.as_ref(), Perms::ReadOnly, true), Enforcement::Unenforced);
+        assert_eq!(perms_achieved(codex.as_ref(), Perms::ReadOnly, false), Enforcement::OsSandbox);
     }
 
     #[test]

@@ -165,16 +165,12 @@ fn run(mut opts: Options) -> ExitCode {
     }
 
     // The enforcement class achieved for the requested perms tier (if any),
-    // reported in metadata. A bypass flag disables enforcement outright, so
-    // report `Unenforced` rather than the tier's nominal class (the preflight
-    // in `check_enforcement` rejects the same combination up front).
-    let perms_enforcement = opts.perms.map(|p| {
-        if opts.skip_permissions {
-            policy::Enforcement::Unenforced
-        } else {
-            adapter.perms_enforcement(p)
-        }
-    });
+    // reported in metadata. A bypass flag disables a sandbox or policy
+    // outright, so those report `Unenforced` rather than the tier's nominal
+    // class (the preflight in `check_enforcement` rejects the same combination
+    // up front). A harness with no tools has nothing to disable.
+    let perms_enforcement =
+        opts.perms.map(|p| adapters::perms_achieved(adapter.as_ref(), p, opts.skip_permissions));
 
     // Resolve `--network` against the harness before spawning: a tier the
     // harness cannot express at all (codex has no domain allowlist, so

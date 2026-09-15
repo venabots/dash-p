@@ -189,6 +189,10 @@ impl Adapter for ApiAdapter {
         // for. A bypass flag changes nothing: there is no sandbox to remove.
         Ok(NetworkPlan::no_tools())
     }
+
+    fn has_tools(&self) -> bool {
+        false
+    }
 }
 
 /// A non-empty environment variable.
