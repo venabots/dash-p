@@ -79,9 +79,11 @@ pub fn parse_reply(status: u16, body: &str) -> Reply {
     let Some(choice) = v.get("choices").and_then(Value::as_array).and_then(|c| c.first()) else {
         return Reply::failure(format!("{status}: response has no choices: {}", super::excerpt(body)));
     };
-    let message = choice.get("message");
-    let text = message.and_then(|m| m.get("content")).map(content_text).unwrap_or_default();
-    let refusal = message.and_then(|m| m.get("refusal")).and_then(Value::as_str).filter(|r| !r.is_empty());
+    let Some(message) = choice.get("message").filter(|m| m.is_object()) else {
+        return Reply::failure(format!("{status}: response choice has no message: {}", super::excerpt(body)));
+    };
+    let text = message.get("content").map(content_text).unwrap_or_default();
+    let refusal = message.get("refusal").and_then(Value::as_str).filter(|r| !r.is_empty());
     let finish = choice.get("finish_reason").and_then(Value::as_str).unwrap_or_default();
     let filtered = finish == "content_filter";
     let capped_empty = finish == "length" && text.is_empty() && refusal.is_none();
@@ -272,6 +274,13 @@ mod tests {
         assert!(r.text.contains("--max-tokens"), "{}", r.text);
         let partial = r#"{"id":"x","model":"m","choices":[{"message":{"content":"half"},"finish_reason":"length"}]}"#;
         assert!(!parse_reply(200, partial).is_error);
+    }
+
+    #[test]
+    fn a_choice_without_a_message_is_an_error() {
+        let r = parse_reply(200, r#"{"id":"x","model":"m","choices":[{}]}"#);
+        assert!(r.is_error);
+        assert!(r.text.contains("no message"), "{}", r.text);
     }
 
     #[test]
