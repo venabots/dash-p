@@ -19,9 +19,13 @@ const API_VERSION: &str = "2023-06-01";
 /// cap needs `--max-tokens`.
 const DEFAULT_MAX_TOKENS: u32 = 16_000;
 
-/// The credential to send. An API key goes in `x-api-key`; a bearer token (an
-/// OAuth token or a proxy's token) goes in `Authorization`. Never both: the API
-/// rejects a request that carries two credentials.
+/// The credential to send. A bearer token (an OAuth token or a gateway's
+/// token) goes in `Authorization`; an API key goes in `x-api-key`. Never both:
+/// the API rejects a request that carries two credentials.
+///
+/// The token wins when both are set, the same order as Claude Code. A gateway
+/// setup sets `ANTHROPIC_AUTH_TOKEN` beside a global `ANTHROPIC_API_KEY`, and
+/// preferring the key would send it to the gateway host.
 ///
 /// A variable named with `--api-key-env` is a key, unless its name ends in
 /// `AUTH_TOKEN`, the `ANTHROPIC_AUTH_TOKEN` convention for a bearer token.
@@ -35,9 +39,9 @@ pub fn credential(
             .map(|value| as_credential(var, value))
             .ok_or_else(|| format!("--api-key-env {var} is not set"));
     }
-    env(API_KEY_ENV)
-        .map(|key| Credential::api_key(API_KEY_ENV, key))
-        .or_else(|| env(AUTH_TOKEN_ENV).map(|token| Credential::bearer(AUTH_TOKEN_ENV, token)))
+    env(AUTH_TOKEN_ENV)
+        .map(|token| Credential::bearer(AUTH_TOKEN_ENV, token))
+        .or_else(|| env(API_KEY_ENV).map(|key| Credential::api_key(API_KEY_ENV, key)))
         .ok_or_else(|| {
             format!("no credential: set {API_KEY_ENV} (or {AUTH_TOKEN_ENV}), or name another variable with --api-key-env")
         })
@@ -169,21 +173,23 @@ mod tests {
     }
 
     #[test]
-    fn an_api_key_wins_over_a_bearer_token_and_never_travels_with_it() {
+    fn a_bearer_token_wins_over_an_api_key_and_never_travels_with_it() {
+        // A gateway setup sets ANTHROPIC_AUTH_TOKEN next to a global
+        // ANTHROPIC_API_KEY. Sending the key would hand it to the gateway.
         let env = env_with(&[(API_KEY_ENV, "sk-ant-1"), (AUTH_TOKEN_ENV, "tok-1")]);
-        let c = credential(None, &env).unwrap();
-        let req = message_request(&call(&c, None));
-        assert!(req.headers.contains(&("x-api-key", "sk-ant-1".to_string())));
-        assert!(!req.headers.iter().any(|(k, _)| *k == "authorization"));
-    }
-
-    #[test]
-    fn a_bearer_token_is_used_when_there_is_no_api_key() {
-        let env = env_with(&[(AUTH_TOKEN_ENV, "tok-1")]);
         let c = credential(None, &env).unwrap();
         let req = message_request(&call(&c, None));
         assert!(req.headers.contains(&("authorization", "Bearer tok-1".to_string())));
         assert!(!req.headers.iter().any(|(k, _)| *k == "x-api-key"));
+    }
+
+    #[test]
+    fn an_api_key_is_used_when_there_is_no_bearer_token() {
+        let env = env_with(&[(API_KEY_ENV, "sk-ant-1")]);
+        let c = credential(None, &env).unwrap();
+        let req = message_request(&call(&c, None));
+        assert!(req.headers.contains(&("x-api-key", "sk-ant-1".to_string())));
+        assert!(!req.headers.iter().any(|(k, _)| *k == "authorization"));
     }
 
     #[test]
