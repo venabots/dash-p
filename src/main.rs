@@ -74,7 +74,9 @@ fn main() -> ExitCode {
     match command {
         Command::Run(opts) => run(*opts),
         Command::ListHarnesses => render(command::list_harnesses),
-        Command::ListModels { harness } => render(|w| command::list_models(w, harness)),
+        Command::ListModels { harness, base_url, api_key_env } => {
+            render(|w| command::list_models(w, harness, base_url.as_deref(), api_key_env.as_deref()))
+        }
         Command::Capabilities { harness } => render(|w| command::capabilities(w, harness)),
         Command::Help => render(|w| w.write_all(command::HELP.as_bytes())),
         Command::Version => render(|w| {

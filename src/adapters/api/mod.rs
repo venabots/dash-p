@@ -201,9 +201,8 @@ fn env_var(name: &str) -> Option<String> {
 }
 
 /// `--base-url`, else the format's base-URL variable, else the vendor's own.
-fn base_url(protocol: Protocol, opts: &Options, env: &dyn Fn(&str) -> Option<String>) -> String {
-    opts.base_url
-        .clone()
+fn base_url(protocol: Protocol, flag: Option<&str>, env: &dyn Fn(&str) -> Option<String>) -> String {
+    flag.map(str::to_string)
         .or_else(|| env(protocol.base_url_env()))
         .unwrap_or_else(|| protocol.default_base_url().to_string())
         .trim_end_matches('/')
@@ -241,7 +240,7 @@ fn run(
     let credential = protocol
         .credential(opts.api_key_env.as_deref(), env)
         .map_err(|why| DriverError::Setup(format!("{harness}: {why}")))?;
-    let base_url = base_url(protocol, opts, env);
+    let base_url = base_url(protocol, opts.base_url.as_deref(), env);
 
     let request = protocol.message_request(&Call {
         base_url: &base_url,
@@ -349,10 +348,24 @@ pub fn credential_status(protocol: Protocol) -> Result<String, String> {
     protocol.credential(None, &env_var).map(|c| c.source)
 }
 
-/// `list models`: the models the provider says this credential can use.
-pub fn list_models(protocol: Protocol) -> Result<Vec<String>, String> {
-    let credential = protocol.credential(None, &env_var)?;
-    let base_url = base_url(protocol, &Options::default(), &env_var);
+/// `list models`: the models the provider says this credential can use, at
+/// the `--base-url` and with the `--api-key-env` a run would use.
+pub fn list_models(
+    protocol: Protocol,
+    base_url_flag: Option<&str>,
+    api_key_env: Option<&str>,
+) -> Result<Vec<String>, String> {
+    list_models_with(protocol, base_url_flag, api_key_env, &env_var)
+}
+
+fn list_models_with(
+    protocol: Protocol,
+    base_url_flag: Option<&str>,
+    api_key_env: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, String> {
+    let credential = protocol.credential(api_key_env, env)?;
+    let base_url = base_url(protocol, base_url_flag, env);
     http::get(protocol.models_request(&base_url, &credential))
         .and_then(|body| protocol.parse_models(&body))
         .map_err(|why| redact(&why, &credential))
@@ -382,11 +395,10 @@ mod tests {
     #[test]
     fn base_url_prefers_the_flag_then_the_variable_then_the_vendor() {
         let env = env_with(vec![(anthropic::BASE_URL_ENV, "https://env.example.com/".into())]);
-        let flag = Options { base_url: Some("http://127.0.0.1:9/".into()), ..Options::default() };
-        assert_eq!(base_url(Protocol::Anthropic, &flag, &env), "http://127.0.0.1:9");
-        assert_eq!(base_url(Protocol::Anthropic, &Options::default(), &env), "https://env.example.com");
-        assert_eq!(base_url(Protocol::Anthropic, &Options::default(), &env_with(vec![])), anthropic::DEFAULT_BASE_URL);
-        assert_eq!(base_url(Protocol::Openai, &Options::default(), &env_with(vec![])), openai::DEFAULT_BASE_URL);
+        assert_eq!(base_url(Protocol::Anthropic, Some("http://127.0.0.1:9/"), &env), "http://127.0.0.1:9");
+        assert_eq!(base_url(Protocol::Anthropic, None, &env), "https://env.example.com");
+        assert_eq!(base_url(Protocol::Anthropic, None, &env_with(vec![])), anthropic::DEFAULT_BASE_URL);
+        assert_eq!(base_url(Protocol::Openai, None, &env_with(vec![])), openai::DEFAULT_BASE_URL);
     }
 
     #[test]
@@ -505,6 +517,17 @@ mod tests {
                 assert_eq!(adapter.network_plan(None, network, bypass).unwrap(), NetworkPlan::no_tools());
             }
         }
+    }
+
+    #[test]
+    fn list_models_uses_the_given_url_and_key_variable() {
+        let (base, request) = serve_once(200, r#"{"data":[{"id":"m1"},{"id":"m2"}]}"#);
+        let env = env_with(vec![("OTHER_KEY", "sk-other".into()), (anthropic::API_KEY_ENV, "sk-default".into())]);
+        let ids = list_models_with(Protocol::Anthropic, Some(&base), Some("OTHER_KEY"), &env).unwrap();
+        assert_eq!(ids, vec!["m1", "m2"]);
+        let raw = request.recv().unwrap();
+        assert!(raw.starts_with("GET /v1/models?limit=1000 "), "{raw}");
+        assert!(raw.contains("sk-other") && !raw.contains("sk-default"), "{raw}");
     }
 
     #[test]
