@@ -1,6 +1,6 @@
 //! The drive loop shared by the adapters that run a natively non-interactive
 //! harness as a plain subprocess and read a JSONL event stream on its stdout
-//! (codex, opencode). There is none of the PTY/hook/DEC machinery here: spawn
+//! (codex, opencode, pi). There is none of the PTY/hook/DEC machinery here: spawn
 //! the child, feed it the prompt, hand each stdout line to the adapter's fold,
 //! and hold the timeout and interrupts.
 //!

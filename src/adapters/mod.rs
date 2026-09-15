@@ -32,6 +32,7 @@ pub mod claude_pty;
 pub mod codex;
 pub mod exec;
 pub mod opencode;
+pub mod pi;
 pub mod procgroup;
 
 /// A backend agent CLI that dash-p can drive to run a single prompt to
@@ -89,7 +90,8 @@ pub fn for_harness(harness: &Harness, pty: bool) -> Option<Box<dyn Adapter>> {
         Harness::Claude | Harness::Custom(_) => Some(Box::new(claude::ClaudeAdapter)),
         Harness::Codex => Some(Box::new(codex::CodexAdapter)),
         Harness::Opencode => Some(Box::new(opencode::OpencodeAdapter)),
-        Harness::Gemini | Harness::Pi => None,
+        Harness::Pi => Some(Box::new(pi::PiAdapter)),
+        Harness::Gemini => None,
     }
 }
 
@@ -226,7 +228,7 @@ mod tests {
     #[test]
     fn restricted_is_rejected_for_codex_but_accepted_elsewhere() {
         // codex has no domain allowlist, so `restricted` is rejected rather
-        // than downgraded. claude/opencode take every tier (callers pass one
+        // than downgraded. claude/opencode/pi take every tier (callers pass one
         // tier across mixed harnesses) and report it unenforced.
         let codex = Options {
             harness: crate::harness::Harness::Codex,
@@ -238,7 +240,11 @@ mod tests {
         assert!(err.starts_with("codex:"), "message names the harness: {err}");
         assert!(err.contains("restricted"), "got: {err}");
 
-        for h in [crate::harness::Harness::Claude, crate::harness::Harness::Opencode] {
+        for h in [
+            crate::harness::Harness::Claude,
+            crate::harness::Harness::Opencode,
+            crate::harness::Harness::Pi,
+        ] {
             let opts = Options {
                 harness: h.clone(),
                 network: Some(Network::Restricted),
@@ -326,6 +332,7 @@ mod tests {
         assert_eq!(for_harness(&crate::harness::Harness::Claude, false).unwrap().drive(), "print");
         assert_eq!(for_harness(&crate::harness::Harness::Claude, true).unwrap().drive(), "pty");
         assert_eq!(for_harness(&crate::harness::Harness::Codex, false).unwrap().drive(), "exec");
+        assert_eq!(for_harness(&crate::harness::Harness::Pi, false).unwrap().drive(), "exec");
     }
 }
 

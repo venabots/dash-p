@@ -67,7 +67,8 @@ it is read from stdin. `run`/`list`/`capabilities` are only recognised as the
 first argument.
 
 Run options:
-  -H, --harness <name|path>   claude (default) | codex | path to a claude-compatible binary
+  -H, --harness <name|path>   claude (default) | codex | opencode | pi
+                              | path to a claude-compatible binary
       --model <id|default>    model id; 'default' requests the harness's own default
       --output-format <fmt>   text (default) | json ({answer,metadata}) | stream-json
       --perms <tier>          read-only | workspace-write | full   (permission tier, by intent)
@@ -75,7 +76,7 @@ Run options:
                               codex always rejects 'restricted' (no domain allowlist).
                               With --perms workspace-write it blocks 'none' and opens
                               'full' (os-sandbox); --perms read-only blocks every tier.
-                              Without --perms, and on claude/opencode, 'none'/'full'
+                              Without --perms, and on claude/opencode/pi, 'none'/'full'
                               are accepted but not enforced. See `capabilities`.
       --require-enforcement <class>   os-sandbox | any   (else exit 32 before running)
       --meta-file <path>      write the authoritative run-metadata envelope here
@@ -178,7 +179,8 @@ pub fn capabilities(w: &mut dyn Write, harness: Option<Harness>) -> std::io::Res
 
 /// `list models`: best-effort, honest about each harness's limits. Neither
 /// codex nor claude exposes a clean model-enumeration command, so we probe what
-/// we can (codex's configured default) and otherwise point at the aliases.
+/// we can (codex's configured default, pi's own `--list-models`) and otherwise
+/// point at the aliases.
 pub fn list_models(w: &mut dyn Write, harness: Option<Harness>) -> std::io::Result<()> {
     let targets: Vec<Harness> = match harness {
         Some(h) => vec![h],
@@ -205,6 +207,17 @@ pub fn list_models(w: &mut dyn Write, harness: Option<Harness>) -> std::io::Resu
             Harness::Opencode => {
                 writeln!(w, "  note: opencode models use provider/model syntax; pass -m <provider/model> (e.g. anthropic/claude-sonnet-4)")?;
                 writeln!(w, "  note: opencode exposes no model-list API and does not report the resolved model; model_resolved is \"unknown\"")?;
+            }
+            Harness::Pi => {
+                match crate::adapters::pi::list_models() {
+                    Some(table) => {
+                        for line in table.lines() {
+                            writeln!(w, "  {line}")?;
+                        }
+                    }
+                    None => writeln!(w, "  models: (unavailable; is pi installed?)")?,
+                }
+                writeln!(w, "  note: pi lists only providers with credentials; pass --model <provider/id> (e.g. anthropic/claude-sonnet-4-5)")?;
             }
             _ => {
                 writeln!(w, "  aliases: opus, sonnet, haiku (or a full claude-* id)")?;
@@ -344,7 +357,7 @@ mod tests {
     fn capabilities_admit_harnesses_that_never_enforce_network() {
         // claude and opencode accept --network and do nothing with it. Saying
         // only "no" left a caller guessing whether the flag was even read.
-        for h in [Harness::Claude, Harness::Opencode] {
+        for h in [Harness::Claude, Harness::Opencode, Harness::Pi] {
             let out = caps_for(h.clone());
             assert!(
                 out.contains("network-control: no (--network is accepted but never enforced)"),
@@ -355,6 +368,15 @@ mod tests {
                 assert!(out.contains(&format!("  {tier:<16} none")), "{}: {out}", h.name());
             }
         }
+    }
+
+    #[test]
+    fn capabilities_report_pi_read_only_as_policy_only() {
+        let out = caps_for(Harness::Pi);
+        let (perms, _) = out.split_once("network (").unwrap_or_else(|| panic!("no network block: {out}"));
+        assert!(perms.contains("read-only        agent-policy"), "{perms}");
+        assert!(perms.contains("workspace-write  none"), "{perms}");
+        assert!(perms.contains("full             none"), "{perms}");
     }
 
     #[test]
