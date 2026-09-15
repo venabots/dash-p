@@ -171,16 +171,17 @@ fn fold_assistant(state: &mut Folded, msg: &Value) {
 
     // `responseModel` is what the provider says ran. `model` is only the id pi
     // asked for: good enough after a completed call, but after a failed one it
-    // would report a model that never ran, so it is not used there.
+    // would report a model that never ran, so it is not used there. A failed
+    // call with nothing to report keeps the model an earlier call confirmed.
     let model = match (str_of("responseModel"), state.is_error) {
         ("", false) => str_of("model"),
         (reported, _) => reported,
     };
-    state.model = match (str_of("provider"), model) {
-        (_, "") => String::new(),
-        ("", m) => m.to_string(),
-        (p, m) => format!("{p}/{m}"),
-    };
+    match (str_of("provider"), model) {
+        (_, "") => {}
+        ("", m) => state.model = m.to_string(),
+        (p, m) => state.model = format!("{p}/{m}"),
+    }
 
     state.error_message = if state.is_error {
         Some(str_of("errorMessage"))
@@ -406,6 +407,13 @@ mod tests {
     fn a_failed_stream_keeps_the_model_the_provider_reported() {
         let line = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial"}],"provider":"fake","model":"fake-ok","stopReason":"error","errorMessage":"500: upstream connection lost","responseModel":"fake-ok-2026-01-01"}}"#;
         assert_eq!(fold(&[line]).model, "fake/fake-ok-2026-01-01");
+    }
+
+    #[test]
+    fn a_failed_last_call_keeps_the_model_an_earlier_call_confirmed() {
+        let f = fold(&[SESSION, USER_END, TOOL_CALL_END, TURN_END, SERVER_ERROR_END, TURN_END]);
+        assert!(f.is_error);
+        assert_eq!(f.model, "fake/fake-tool-2026-01-01");
     }
 
     #[test]
