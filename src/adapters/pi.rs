@@ -137,16 +137,6 @@ fn fold_assistant(state: &mut Folded, msg: &Value) {
         }
     }
 
-    // `responseModel` is what the provider says ran; `model` is only the id pi
-    // asked for, so it is the fallback.
-    let model = Some(str_of("responseModel"))
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| str_of("model"));
-    state.model = match (str_of("provider"), model) {
-        (_, "") => String::new(),
-        ("", m) => m.to_string(),
-        (p, m) => format!("{p}/{m}"),
-    };
 
     state.final_text = msg
         .get("content")
@@ -162,6 +152,20 @@ fn fold_assistant(state: &mut Folded, msg: &Value) {
 
     let stop = str_of("stopReason");
     state.is_error = matches!(stop, "error" | "aborted");
+
+    // `responseModel` is what the provider says ran. `model` is only the id pi
+    // asked for: good enough after a completed call, but after a failed one it
+    // would report a model that never ran, so it is not used there.
+    let model = match (str_of("responseModel"), state.is_error) {
+        ("", false) => str_of("model"),
+        (reported, _) => reported,
+    };
+    state.model = match (str_of("provider"), model) {
+        (_, "") => String::new(),
+        ("", m) => m.to_string(),
+        (p, m) => format!("{p}/{m}"),
+    };
+
     state.error_message = if state.is_error {
         Some(str_of("errorMessage"))
             .filter(|m| !m.is_empty())
@@ -176,13 +180,14 @@ fn fold_assistant(state: &mut Folded, msg: &Value) {
 /// Heuristic: does an error message say the model was rejected? Matched against
 /// the text pi relays: its own `Model "x" not found`, an OpenAI-style "does not
 /// exist", or Anthropic's `not_found_error`, so exit 31 reflects a live verdict.
+/// "not supported" is left out on purpose: provider errors use it for a
+/// parameter the model does not take, which is not a rejected model.
 fn looks_like_model_error(msg: &str) -> bool {
     let m = msg.to_ascii_lowercase();
     m.contains("model")
         && (m.contains("not found")
             || m.contains("not_found")
             || m.contains("does not exist")
-            || m.contains("not supported")
             || m.contains("unknown model")
             || m.contains("invalid model"))
 }
@@ -235,17 +240,7 @@ fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<RunOutc
     if !done.success || !folded.saw_assistant {
         folded.is_error = true;
     }
-    let final_text = if !folded.final_text.is_empty() {
-        folded.final_text
-    } else if !folded.error_message.is_empty() {
-        folded.error_message
-    } else if folded.is_error {
-        let tail = done.stderr_tail();
-        folded.invalid_model = stderr_rejects_model(&tail);
-        if tail.is_empty() { "pi produced no assistant message".to_string() } else { tail }
-    } else {
-        String::new()
-    };
+    let (final_text, stderr_rejected_model) = answer(&folded, || done.stderr_tail());
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let summary = Summary {
@@ -265,8 +260,28 @@ fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<RunOutc
         summary,
         duration_ms,
         streamed,
-        invalid_model: folded.invalid_model,
+        invalid_model: folded.invalid_model || stderr_rejected_model,
     })
+}
+
+/// The text to print, and whether pi's stderr rejected the model. When the last
+/// call failed, pi's error text wins over any partial text the call streamed.
+/// A failure before any call has only pi's stderr to explain it, so the stderr
+/// tail is read only then.
+fn answer(folded: &Folded, stderr_tail: impl FnOnce() -> String) -> (String, bool) {
+    if !folded.error_message.is_empty() {
+        return (folded.error_message.clone(), false);
+    }
+    if !folded.final_text.is_empty() {
+        return (folded.final_text.clone(), false);
+    }
+    if !folded.is_error {
+        return (String::new(), false);
+    }
+    let tail = stderr_tail();
+    let rejected = stderr_rejects_model(&tail);
+    let text = if tail.is_empty() { "pi produced no assistant message".to_string() } else { tail };
+    (text, rejected)
 }
 
 /// `pi --list-models`: the models pi can use right now (only providers with
@@ -350,8 +365,40 @@ mod tests {
         let f = fold(&[SESSION, USER_END, MISSING_MODEL_END, TURN_END]);
         assert!(f.is_error);
         assert!(f.invalid_model);
-        // No responseModel on a failed call: fall back to the requested id.
-        assert_eq!(f.model, "fake/fake-missing");
+        // The call never ran, so the requested id must not read as resolved.
+        assert_eq!(f.model, "");
+    }
+
+    #[test]
+    fn a_failed_stream_keeps_the_model_the_provider_reported() {
+        let line = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial"}],"provider":"fake","model":"fake-ok","stopReason":"error","errorMessage":"500: upstream connection lost","responseModel":"fake-ok-2026-01-01"}}"#;
+        assert_eq!(fold(&[line]).model, "fake/fake-ok-2026-01-01");
+    }
+
+    #[test]
+    fn a_failed_call_shows_pi_s_error_not_the_partial_text() {
+        let line = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial"}],"provider":"fake","model":"fake-ok","stopReason":"error","errorMessage":"500: upstream connection lost"}}"#;
+        let (text, rejected) = answer(&fold(&[line]), || panic!("stderr is not needed"));
+        assert_eq!(text, "500: upstream connection lost");
+        assert!(!rejected);
+    }
+
+    #[test]
+    fn a_failure_before_any_call_shows_pi_s_stderr() {
+        let f = Folded { is_error: true, ..Folded::default() };
+        let (text, rejected) = answer(&f, || r#"Error: Model "bogus/xyz" not found."#.to_string());
+        assert_eq!(text, r#"Error: Model "bogus/xyz" not found."#);
+        assert!(rejected);
+
+        let (text, rejected) = answer(&f, String::new);
+        assert_eq!(text, "pi produced no assistant message");
+        assert!(!rejected);
+    }
+
+    #[test]
+    fn a_successful_answer_is_the_assistant_text() {
+        let (text, _) = answer(&fold(&[ANSWER_END]), || panic!("stderr is not needed"));
+        assert_eq!(text, "ok");
     }
 
     #[test]
@@ -367,6 +414,10 @@ mod tests {
             r#"404 {"type":"error","error":{"type":"not_found_error","message":"model: claude-bogus"}}"#
         ));
         assert!(!looks_like_model_error("500: upstream exploded"));
+        // A parameter the model does not take is not a rejected model.
+        assert!(!looks_like_model_error(
+            "400: Unsupported parameter: 'max_tokens' is not supported with this model."
+        ));
     }
 
     #[test]
