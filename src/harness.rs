@@ -12,7 +12,8 @@
 //! directly (this subsumes the `DASHP_CLAUDE_BIN` escape hatch).
 
 /// Known harness names, in the order shown in help/error text.
-pub const KNOWN_NAMES: &[&str] = &["claude", "codex", "opencode", "gemini", "pi", "anthropic-api"];
+pub const KNOWN_NAMES: &[&str] =
+    &["claude", "codex", "opencode", "gemini", "pi", "anthropic-api", "openai-api"];
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum Harness {
@@ -27,6 +28,8 @@ pub enum Harness {
     Pi,
     /// The Anthropic Messages API, called directly (no binary).
     AnthropicApi,
+    /// OpenAI Chat Completions, called directly (no binary).
+    OpenaiApi,
     /// A binary name or path not in the known list, driven with the Claude
     /// protocol (it must be a claude-compatible CLI).
     Custom(String),
@@ -43,6 +46,7 @@ impl Harness {
             "gemini" => Self::Gemini,
             "pi" => Self::Pi,
             "anthropic-api" => Self::AnthropicApi,
+            "openai-api" => Self::OpenaiApi,
             _ => Self::Custom(s.to_string()),
         }
     }
@@ -56,13 +60,14 @@ impl Harness {
             Self::Gemini => "gemini",
             Self::Pi => "pi",
             Self::AnthropicApi => "anthropic-api",
+            Self::OpenaiApi => "openai-api",
             Self::Custom(s) => s,
         }
     }
 
     /// An API harness calls a provider over HTTP and has no binary.
     pub fn is_api(&self) -> bool {
-        matches!(self, Self::AnthropicApi)
+        matches!(self, Self::AnthropicApi | Self::OpenaiApi)
     }
 
     /// Best-effort harness version: run `<bin> --version` and return the first
@@ -88,7 +93,7 @@ impl Harness {
             Self::Opencode => Some("opencode"),
             Self::Gemini => Some("gemini"),
             Self::Pi => Some("pi"),
-            Self::AnthropicApi => None,
+            Self::AnthropicApi | Self::OpenaiApi => None,
             Self::Custom(s) => Some(s),
         }
     }
@@ -111,11 +116,14 @@ mod tests {
         assert_eq!(Harness::parse("gemini"), Harness::Gemini);
         assert_eq!(Harness::parse("pi"), Harness::Pi);
         assert_eq!(Harness::parse("Anthropic-API"), Harness::AnthropicApi);
+        assert_eq!(Harness::parse("openai-api"), Harness::OpenaiApi);
     }
 
     #[test]
     fn api_harnesses_have_no_binary() {
         assert!(Harness::AnthropicApi.is_api());
+        assert!(Harness::OpenaiApi.is_api());
+        assert_eq!(Harness::OpenaiApi.bin(), None);
         assert_eq!(Harness::AnthropicApi.bin(), None);
         assert_eq!(Harness::AnthropicApi.probe_version(), None);
         assert!(!Harness::Claude.is_api());

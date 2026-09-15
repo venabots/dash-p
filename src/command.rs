@@ -67,7 +67,8 @@ it is read from stdin. `run`/`list`/`capabilities` are only recognised as the
 first argument.
 
 Run options:
-  -H, --harness <name|path>   claude (default) | codex | opencode | pi | anthropic-api
+  -H, --harness <name|path>   claude (default) | codex | opencode | pi
+                              | anthropic-api | openai-api
                               | path to a claude-compatible binary
       --model <id|default>    model id; 'default' requests the harness's own default
       --output-format <fmt>   text (default) | json ({answer,metadata}) | stream-json

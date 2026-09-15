@@ -24,17 +24,20 @@ use crate::transcript::{Summary, Usage};
 
 pub mod anthropic;
 mod http;
+pub mod openai;
 
 /// The wire formats dash-p speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Anthropic,
+    Openai,
 }
 
 impl Protocol {
     pub fn for_harness(harness: &Harness) -> Option<Self> {
         match harness {
             Harness::AnthropicApi => Some(Self::Anthropic),
+            Harness::OpenaiApi => Some(Self::Openai),
             _ => None,
         }
     }
@@ -42,18 +45,21 @@ impl Protocol {
     fn harness_name(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic-api",
+            Self::Openai => "openai-api",
         }
     }
 
     fn default_base_url(self) -> &'static str {
         match self {
             Self::Anthropic => anthropic::DEFAULT_BASE_URL,
+            Self::Openai => openai::DEFAULT_BASE_URL,
         }
     }
 
     fn base_url_env(self) -> &'static str {
         match self {
             Self::Anthropic => anthropic::BASE_URL_ENV,
+            Self::Openai => openai::BASE_URL_ENV,
         }
     }
 
@@ -64,30 +70,35 @@ impl Protocol {
     ) -> Result<Credential, String> {
         match self {
             Self::Anthropic => anthropic::credential(api_key_env, env),
+            Self::Openai => openai::credential(api_key_env, env),
         }
     }
 
     fn message_request(self, call: &Call) -> HttpRequest {
         match self {
             Self::Anthropic => anthropic::message_request(call),
+            Self::Openai => openai::message_request(call),
         }
     }
 
     fn parse_reply(self, status: u16, body: &str) -> Reply {
         match self {
             Self::Anthropic => anthropic::parse_reply(status, body),
+            Self::Openai => openai::parse_reply(status, body),
         }
     }
 
     fn models_request(self, base_url: &str, credential: &Credential) -> HttpRequest {
         match self {
             Self::Anthropic => anthropic::models_request(base_url, credential),
+            Self::Openai => openai::models_request(base_url, credential),
         }
     }
 
     fn parse_models(self, body: &str) -> Result<Vec<String>, String> {
         match self {
             Self::Anthropic => anthropic::parse_models(body),
+            Self::Openai => openai::parse_models(body),
         }
     }
 }
@@ -358,6 +369,7 @@ mod tests {
         assert_eq!(base_url(Protocol::Anthropic, &flag, &env), "http://127.0.0.1:9");
         assert_eq!(base_url(Protocol::Anthropic, &Options::default(), &env), "https://env.example.com");
         assert_eq!(base_url(Protocol::Anthropic, &Options::default(), &env_with(vec![])), anthropic::DEFAULT_BASE_URL);
+        assert_eq!(base_url(Protocol::Openai, &Options::default(), &env_with(vec![])), openai::DEFAULT_BASE_URL);
     }
 
     #[test]
@@ -384,6 +396,22 @@ mod tests {
         assert!(raw.starts_with("POST /v1/messages "), "{raw}");
         assert!(raw.to_ascii_lowercase().contains("x-api-key: sk-test"), "{raw}");
         assert!(raw.contains(r#""content":"say ok""#), "{raw}");
+    }
+
+    #[test]
+    fn an_openai_run_posts_a_chat_completion_with_a_bearer_key() {
+        let body = r#"{"id":"chatcmpl-1","model":"gpt-5.5-2026-04-01","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":5}}}"#;
+        let (base, request) = serve_once(200, body);
+        let env = env_with(vec![(openai::API_KEY_ENV, "sk-test".into())]);
+        let o = Options { base_url: Some(format!("{base}/v1")), model: Some("gpt-5.5".into()), ..opts(&base) };
+        let out = run(Protocol::Openai, &o, &env, None).unwrap();
+        assert_eq!(out.summary.final_text, "ok");
+        assert_eq!(out.summary.model, "gpt-5.5-2026-04-01");
+        assert_eq!(out.summary.usage.input_tokens, 6);
+
+        let raw = request.recv().unwrap();
+        assert!(raw.starts_with("POST /v1/chat/completions "), "{raw}");
+        assert!(raw.to_ascii_lowercase().contains("authorization: bearer sk-test"), "{raw}");
     }
 
     #[test]
@@ -437,7 +465,7 @@ mod tests {
 
     #[test]
     fn every_tier_is_held_by_having_no_tools() {
-        let adapter = ApiAdapter(Protocol::Anthropic);
+        let adapter = ApiAdapter(Protocol::Openai);
         for perms in [Perms::ReadOnly, Perms::WorkspaceWrite, Perms::Full] {
             assert_eq!(adapter.perms_enforcement(perms), Enforcement::NoTools);
         }

@@ -93,6 +93,7 @@ pub fn for_harness(harness: &Harness, pty: bool) -> Option<Box<dyn Adapter>> {
         Harness::Opencode => Some(Box::new(opencode::OpencodeAdapter)),
         Harness::Pi => Some(Box::new(pi::PiAdapter)),
         Harness::AnthropicApi => Some(Box::new(api::ApiAdapter(api::Protocol::Anthropic))),
+        Harness::OpenaiApi => Some(Box::new(api::ApiAdapter(api::Protocol::Openai))),
         Harness::Gemini => None,
     }
 }
