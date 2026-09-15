@@ -67,9 +67,14 @@ pub fn get(request: HttpRequest) -> Result<String, String> {
 
 /// An agent that returns every status as a response: the error body is what
 /// says why a call failed, and a status-as-error would drop it.
+///
+/// Redirects are not followed. ureq strips `Authorization` on a redirect but
+/// not `x-api-key`, so following one could send the key to another host, and a
+/// model API has no reason to redirect a request.
 fn agent(timeout: Duration) -> Agent {
     Agent::config_builder()
         .http_status_as_error(false)
+        .max_redirects(0)
         .timeout_global(Some(timeout))
         .build()
         .into()
@@ -109,6 +114,16 @@ pub mod tests {
     /// A one-shot HTTP server on a free local port. It answers one request with
     /// `status` and `body`, and sends the raw request it read back to the test.
     pub fn serve_once(status: u16, body: &'static str) -> (String, mpsc::Receiver<String>) {
+        serve_raw(move || {
+            format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        })
+    }
+
+    /// As `serve_once`, with the whole raw response built by `respond`.
+    fn serve_raw(respond: impl FnOnce() -> String + Send + 'static) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = mpsc::channel();
@@ -133,11 +148,7 @@ pub mod tests {
             let _ = reader.read_exact(&mut payload);
             let _ = tx.send(format!("{head}\r\n{}", String::from_utf8_lossy(&payload)));
             let mut stream = stream;
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
+            let _ = stream.write_all(respond().as_bytes());
         });
         (base, rx)
     }
@@ -159,6 +170,24 @@ pub mod tests {
         assert!(raw.starts_with("POST /v1/x "), "{raw}");
         assert!(raw.contains("x-test: 1"), "{raw}");
         assert!(raw.ends_with("{}"), "{raw}");
+    }
+
+    #[test]
+    fn a_redirect_is_returned_not_followed_so_the_key_stays_put() {
+        // `x-api-key` is not a header ureq strips on a redirect, so following
+        // one would send the key to whatever host the Location names.
+        let (elsewhere, leaked) = serve_once(200, "{}");
+        let (base, _) = serve_raw(move || {
+            format!("HTTP/1.1 307 X\r\nlocation: {elsewhere}/v1/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+        });
+        let request = HttpRequest {
+            url: format!("{base}/v1/x"),
+            headers: vec![("x-api-key", "sk-secret".into())],
+            body: Some("{}".into()),
+        };
+        let out = send(request, &opts(5_000)).unwrap();
+        assert!(matches!(out, Outcome::Response { status: 307, .. }), "{out:?}");
+        assert!(leaked.recv_timeout(Duration::from_millis(300)).is_err(), "the redirect was followed");
     }
 
     #[test]
