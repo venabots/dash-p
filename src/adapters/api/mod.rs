@@ -219,6 +219,23 @@ fn system_prompt(opts: &Options) -> Option<&str> {
     })
 }
 
+/// The forwarded flags an API harness cannot honor: every flag in
+/// `extra_args` except `--system-prompt`. They were meant for an agent CLI, and
+/// a run that dropped them would not be the run the caller asked for.
+pub fn unsupported_flags(opts: &Options) -> Vec<&str> {
+    let mut skip_value = false;
+    opts.extra_args
+        .iter()
+        .filter_map(|arg| {
+            let flag = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+            let is_system_prompt = flag == "--system-prompt";
+            let takes_next = is_system_prompt && !arg.contains('=');
+            let skipped = std::mem::replace(&mut skip_value, takes_next);
+            (!skipped && !is_system_prompt && arg.starts_with('-')).then_some(flag)
+        })
+        .collect()
+}
+
 fn run(
     protocol: Protocol,
     opts: &Options,
@@ -422,6 +439,22 @@ mod tests {
         assert_eq!(base_url(Protocol::Anthropic, None, &env), "https://env.example.com");
         assert_eq!(base_url(Protocol::Anthropic, None, &env_with(vec![])), anthropic::DEFAULT_BASE_URL);
         assert_eq!(base_url(Protocol::Openai, None, &env_with(vec![])), openai::DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn every_forwarded_flag_but_the_system_prompt_is_unsupported() {
+        let o = Options {
+            extra_args: [
+                "--system-prompt", "be brief", "--fallback-model", "y", "--verbose",
+                "--append-system-prompt=x", "--allowedTools", "Bash(git *)",
+            ]
+            .map(String::from)
+            .to_vec(),
+            ..Options::default()
+        };
+        assert_eq!(unsupported_flags(&o), vec!["--fallback-model", "--verbose", "--append-system-prompt", "--allowedTools"]);
+        let only_system = Options { extra_args: vec!["--system-prompt=hi".into()], ..Options::default() };
+        assert!(unsupported_flags(&only_system).is_empty());
     }
 
     #[test]

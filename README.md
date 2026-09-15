@@ -162,9 +162,10 @@ Unrecognised flags are forwarded to `claude`. `-p`/`--print` is accepted but
 ignored — dash-p already emulates print mode, so the flag is redundant, and
 swallowing it lets callers that invoke `claude -p "..."` point at dash-p
 unchanged. A user-supplied `--settings` is rejected (we inject our own settings
-for the Stop hook). The API harnesses read `--system-prompt`, and refuse to run
-on a CLI harness with `--base-url`, `--api-key-env`, or `--max-tokens` (exit 2)
-rather than ignore them.
+for the Stop hook). The API harnesses read `--system-prompt` and refuse every
+other forwarded flag (exit 2). The reverse holds too: a CLI harness refuses
+`--base-url`, `--api-key-env`, and `--max-tokens` (exit 2) rather than ignore
+them.
 
 `--model default` is the explicit way to ask for the harness's own default
 (reported as `model_requested: "default"`); any other value passes through and

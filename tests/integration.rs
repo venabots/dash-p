@@ -627,3 +627,13 @@ fn api_flags_are_refused_on_a_cli_harness() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--base-url"), "stderr: {stderr}");
 }
+
+/// The reverse of the rule above: a flag meant for an agent CLI is refused on
+/// an API harness, before any request.
+#[test]
+fn cli_flags_are_refused_on_an_api_harness() {
+    let out = run(&["-H", "openai-api", "--model", "m", "--fallback-model", "x", "--", "hi"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--fallback-model"), "stderr: {stderr}");
+}

@@ -145,6 +145,16 @@ fn run(mut opts: Options) -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // The reverse: flags meant for an agent CLI mean nothing to an API call.
+    let cli_flags = adapters::api::unsupported_flags(&opts);
+    if opts.harness.is_api() && !cli_flags.is_empty() {
+        eprintln!(
+            "dash-p: the '{}' harness does not support {} (it reads only --system-prompt)",
+            opts.harness.name(),
+            cli_flags.join(", ")
+        );
+        return ExitCode::from(2);
+    }
 
     // No positional prompt: read it from stdin (so multiline prompts and pipes
     // work without shell escaping).
