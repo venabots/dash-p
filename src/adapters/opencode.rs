@@ -12,29 +12,17 @@
 //! `none` (never agent-policy or os-sandbox). Reporting that honestly is the
 //! point; see `perms_enforcement`.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::io::Write;
+use std::process::Command;
+use std::time::Instant;
 
 use serde_json::Value;
 
-use crate::adapters::procgroup;
+use crate::adapters::exec;
 use crate::adapters::{Adapter, DriverError, RunOutcome};
 use crate::args::Options;
 use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
-use crate::signals;
 use crate::transcript::{Summary, Usage};
-
-const POLL: Duration = Duration::from_millis(50);
-/// Cap on captured stderr surfaced when opencode fails without a JSON answer.
-const STDERR_TAIL_CAP: usize = 8192;
-/// Bounded wait for the detached stderr reader to drain before snapshotting the
-/// tail for a failure diagnostic.
-const STDERR_DRAIN_WAIT: Duration = Duration::from_millis(200);
 
 /// Drives the `opencode` CLI via its non-interactive `run` subcommand.
 pub struct OpencodeAdapter;
@@ -226,113 +214,14 @@ fn build_argv(opts: &Options) -> Vec<String> {
 
 fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<RunOutcome, DriverError> {
     let start = Instant::now();
-    let timeout = Duration::from_millis(opts.timeout_ms);
+    let mut cmd = Command::new("opencode");
+    cmd.args(build_argv(opts));
 
-    // opencode prints incidental notes to stderr ("Shell cwd was reset to ...").
-    // Don't pass it through by default, but capture the tail so a startup
-    // failure that never reaches the JSON stdout stream still yields a
-    // diagnostic. `--debug` also mirrors it to our stderr live.
-    let mut child = {
-        let mut cmd = Command::new("opencode");
-        cmd.args(build_argv(opts))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // opencode spawns its own tool subprocesses; lead a process group so an
-        // interrupt/timeout tears the whole tree down, not just the top level.
-        procgroup::lead_process_group(&mut cmd);
-        cmd.spawn().map_err(|e| DriverError::Spawn(e.into()))?
-    };
-
-    // Drain stderr into a bounded byte tail (mirrored under --debug). See the
-    // codex adapter for the rationale on the detached, never-joined reader.
-    let mut stderr_pipe = child.stderr.take().expect("piped stderr");
-    let debug = opts.debug;
-    let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let stderr_done = Arc::new(AtomicBool::new(false));
-    let stderr_tail_writer = Arc::clone(&stderr_tail);
-    let stderr_done_writer = Arc::clone(&stderr_done);
-    thread::spawn(move || {
-        let mut chunk = [0u8; 4096];
-        loop {
-            match stderr_pipe.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if debug {
-                        let _ = std::io::stderr().write_all(&chunk[..n]);
-                    }
-                    if let Ok(mut tail) = stderr_tail_writer.lock() {
-                        tail.extend_from_slice(&chunk[..n]);
-                        if tail.len() > STDERR_TAIL_CAP {
-                            let cut = tail.len() - STDERR_TAIL_CAP;
-                            tail.drain(..cut);
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        stderr_done_writer.store(true, Ordering::SeqCst);
-    });
-
-    // Read stdout lines on a thread so the main loop can honor the timeout and
-    // interrupts even while a read would otherwise block.
-    let stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = mpsc::channel::<String>();
-    let reader = thread::spawn(move || {
-        let mut r = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match r.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if tx.send(line.clone()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    let streaming =
-        opts.output_format == crate::args::OutputFormat::StreamJson && stream_out.is_some();
     let mut folded = Folded::default();
-    let mut replay = String::new();
-
-    loop {
-        if signals::interrupted() {
-            procgroup::terminate_group(child.id());
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(DriverError::Interrupted);
-        }
-        if start.elapsed() > timeout {
-            procgroup::terminate_group(child.id());
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(DriverError::StopTimeout);
-        }
-        match rx.recv_timeout(POLL) {
-            Ok(line) => {
-                if streaming
-                    && let Some(w) = stream_out.as_mut()
-                {
-                    let _ = w.write_all(line.as_bytes());
-                    let _ = w.flush();
-                }
-                replay.push_str(&line);
-                fold_event(&mut folded, line.trim_end());
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
-    let _ = reader.join();
-    let status = child.wait().map_err(DriverError::Io)?;
-    if !status.success() {
+    let done = exec::run_jsonl(cmd, None, opts, stream_out.as_deref_mut(), |line| {
+        fold_event(&mut folded, line)
+    })?;
+    if !done.success {
         folded.is_error = true;
     }
 
@@ -346,14 +235,7 @@ fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<RunOutc
     } else if !folded.error_message.is_empty() {
         folded.error_message.clone()
     } else if folded.is_error {
-        let deadline = Instant::now() + STDERR_DRAIN_WAIT;
-        while !stderr_done.load(Ordering::SeqCst) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
-        stderr_tail
-            .lock()
-            .map(|t| String::from_utf8_lossy(&t).trim().to_string())
-            .unwrap_or_default()
+        done.stderr_tail()
     } else {
         String::new()
     };
@@ -369,17 +251,9 @@ fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<RunOutc
         total_cost_usd: folded.total_cost_usd,
         duration_api_ms: 0,
         usage: folded.usage,
-        jsonl_replay: replay,
+        jsonl_replay: done.replay,
     };
-
-    let mut streamed = false;
-    if streaming
-        && let Some(w) = stream_out.as_mut()
-    {
-        crate::emit::emit_result_envelope(*w, &summary, duration_ms).map_err(DriverError::Io)?;
-        let _ = w.flush();
-        streamed = true;
-    }
+    let streamed = exec::finish_stream(opts, stream_out, &summary, duration_ms)?;
 
     Ok(RunOutcome {
         summary,

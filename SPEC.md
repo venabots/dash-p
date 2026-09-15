@@ -71,7 +71,9 @@ argv -> hook harness (FIFO + relay script + --settings)
 | `adapters/claude_pty.rs`    | `--pty` fallback: PTY drive, pump thread, FIFO poll, Stop hook.              |
 | `adapters/claude_common.rs` | Shared claude bits: bin resolution, perms flags, enforcement.                |
 | `adapters/codex.rs`         | codex adapter: `codex exec --json`, fold events, rollout model lookup.       |
+| `adapters/exec.rs`          | Shared subprocess loop: spawn, stdin prompt, stderr tail, timeout/interrupt. |
 | `adapters/opencode.rs`      | opencode adapter: `opencode run --format json`, fold events (no OS sandbox). |
+| `adapters/pi.rs`            | pi adapter: `pi -p --mode json`, prompt on stdin, fold events (no sandbox).  |
 | `dec.rs`                    | Stateful DEC/XTerm query responder (carry buffer across reads).              |
 | `hook.rs`                   | Temp dir + FIFO + relay script + inline `--settings` JSON; payload parse.    |
 | `pty.rs`                    | PTY spawn (execs argv directly — no `sh -c`).                                |
@@ -84,7 +86,9 @@ Adapters live in `src/adapters/`: each backend agent CLI implements the
 `Adapter` trait in its own module, so adding a harness is "drop a file in
 `adapters/` and wire it into `for_harness`". The Claude protocol (PTY + Stop
 hook) is one such adapter; harnesses with a real non-interactive mode (codex,
-opencode) are plain subprocess adapters with no PTY/hook machinery.
+opencode, pi) are plain subprocess adapters with no PTY/hook machinery. They
+share one drive loop (`adapters/exec.rs`) and differ only in argv, where the
+prompt goes, and how the event stream folds.
 
 ### 2.1 Concurrency
 
@@ -165,6 +169,10 @@ class** it actually achieves — `os-sandbox`, `agent-policy`, or `none`:
 | `workspace-write` | `--sandbox workspace-write`    | os-sandbox  | bypassPermissions     | none         |
 | `full`            | `--sandbox danger-full-access` | none        | bypassPermissions     | none         |
 
+pi has no sandbox. `read-only` passes `--tools read,grep,find,ls` (agent-policy);
+the write tiers keep pi's default tools and report `none`. opencode reports
+`none` for every tier.
+
 claude's `read-only` denies the mutating tools
 (`--disallowedTools "Edit Write NotebookEdit Bash WebFetch WebSearch"`) rather
 than `--permission-mode plan`: plan mode silently overrides `--model` (it
@@ -180,11 +188,11 @@ through and reports it unenforced.
 Network is resolved separately, by `Adapter::network_plan` →
 `policy::NetworkPlan { effective, enforcement }`:
 
-| intent       | codex (with `--perms read-only\|workspace-write`)              | claude / opencode |
-| ------------ | -------------------------------------------------------------- | ----------------- |
-| `none`       | `-c sandbox_workspace_write.network_access=false` (os-sandbox) | none              |
-| `restricted` | `Err` → exit 32 (codex has no domain allowlist)                | none              |
-| `full`       | `-c sandbox_workspace_write.network_access=true`               | none              |
+| intent       | codex (with `--perms read-only\|workspace-write`)              | claude / opencode / pi |
+| ------------ | -------------------------------------------------------------- | ---------------------- |
+| `none`       | `-c sandbox_workspace_write.network_access=false` (os-sandbox) | none                   |
+| `restricted` | `Err` → exit 32 (codex has no domain allowlist)                | none                   |
+| `full`       | `-c sandbox_workspace_write.network_access=true`               | none                   |
 
 The codex column holds only with a sandboxed `--perms` tier. `restricted` is
 rejected either way — the tier has no codex equivalent, so `--perms` cannot

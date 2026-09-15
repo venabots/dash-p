@@ -59,9 +59,17 @@ today:
   has no OS sandbox and doesn't expose the resolved model, so enforcement is
   reported as `agent-policy` at best and `model_resolved` as `unknown` — see
   Caveats.
+- **`pi`** — `pi -p --mode json`, a plain subprocess. The prompt goes on stdin,
+  because pi reads any argument that starts with `@` as a file to attach. Usage
+  and cost come from pi's own events. `model_resolved` is `provider/model`: the
+  model the provider reported when pi relays it, else the model id pi sent. A
+  failed call counts only a model the provider reported, so a run whose only
+  call failed before that reports `unknown`.
+  Usage includes the model calls that compaction and tools make. pi has no
+  sandbox, so `--perms read-only` is `agent-policy` at best — see Permissions.
 
-`gemini` and `pi` are recognised and reserved (selecting one fails fast until
-it's wired up). A value that isn't a known name is treated as a path to a
+`gemini` is recognised and reserved (selecting it fails fast until it's wired
+up). A value that isn't a known name is treated as a path to a
 **claude-compatible** binary and driven via `claude -p` — handy for a fork or a
 wrapper shim. The default is `claude`.
 
@@ -75,8 +83,8 @@ prefer the native drive.
 The default **`claude`** harness simply runs `claude -p --output-format json`
 and parses the result envelope (answer, usage, cost, and the `modelUsage` key
 that gives the authoritative model). codex similarly runs `codex exec --json`,
-and opencode runs `opencode run --format json`; both fold their JSONL event
-streams into the same answer + metadata envelope.
+opencode runs `opencode run --format json`, and pi runs `pi -p --mode json`;
+each folds its JSONL event stream into the same answer + metadata envelope.
 Neither needs a PTY.
 
 The **`--pty`** fallback is the original mechanism — driving the interactive TUI
@@ -138,11 +146,13 @@ with its own message — e.g. codex's _"The 'x' model is not supported…"_.
 native mechanism, and the metadata reports the **enforcement class** actually
 achieved — honestly, instead of a uniform-looking flag that lies.
 
-| intent            | codex (`codex exec`)                     | claude                               |
-| ----------------- | ---------------------------------------- | ------------------------------------ |
-| `read-only`       | `--sandbox read-only` (os-sandbox)       | `--disallowedTools …` (agent-policy) |
-| `workspace-write` | `--sandbox workspace-write` (os-sandbox) | bypassPermissions (none)             |
-| `full`            | `--sandbox danger-full-access` (none)    | bypassPermissions (none)             |
+| intent            | codex (`codex exec`)                     | claude                               | pi                                         |
+| ----------------- | ---------------------------------------- | ------------------------------------ | ------------------------------------------ |
+| `read-only`       | `--sandbox read-only` (os-sandbox)       | `--disallowedTools …` (agent-policy) | `--tools read,grep,find,ls` (agent-policy) |
+| `workspace-write` | `--sandbox workspace-write` (os-sandbox) | bypassPermissions (none)             | pi's default tools (none)                  |
+| `full`            | `--sandbox danger-full-access` (none)    | bypassPermissions (none)             | pi's default tools (none)                  |
+
+opencode reports `none` for every tier.
 
 `--require-enforcement os-sandbox` makes the difference enforceable: it fails
 fast (exit 32) when the harness can't meet the demand, before anything runs.
@@ -194,16 +204,29 @@ sit outside that boundary, and dash-p does not claim them:
 Neither is introduced by dash-p, but `os-sandbox` should be read as "codex's
 sandbox, held to the tier you asked for", not "nothing can reach out".
 
+**What `agent-policy` covers on pi.** `--tools` is an allowlist by tool name,
+and it also filters extension and custom tools. pi itself still runs with your
+permissions:
+
+- **Extensions.** Global extensions in `~/.pi/agent/extensions` still load, and
+  so do a project's `.pi/extensions` when you trusted that project in pi. Their
+  event handlers run unsandboxed. Only the tools they register are filtered,
+  and an extension that registers `read`, `grep`, `find`, or `ls` replaces the
+  built-in tool. The replacement stays enabled, because the allowlist matches
+  names.
+- **Reads.** The read tools can read any file your user can, not only the
+  working directory.
+
 ### Network
 
 `--network` requests an egress tier the same way. Only codex can hold one, and
 only through its sandbox:
 
-| intent       | codex                                                          | claude / opencode |
-| ------------ | -------------------------------------------------------------- | ----------------- |
-| `none`       | `-c sandbox_workspace_write.network_access=false` (os-sandbox) | not enforced      |
-| `restricted` | rejected — no domain allowlist exists (exit 32)                | not enforced      |
-| `full`       | `-c sandbox_workspace_write.network_access=true`               | not enforced      |
+| intent       | codex                                                          | claude / opencode / pi |
+| ------------ | -------------------------------------------------------------- | ---------------------- |
+| `none`       | `-c sandbox_workspace_write.network_access=false` (os-sandbox) | not enforced           |
+| `restricted` | rejected — no domain allowlist exists (exit 32)                | not enforced           |
+| `full`       | `-c sandbox_workspace_write.network_access=true`               | not enforced           |
 
 dash-p pins that switch explicitly whenever `--network` is passed, so the
 caller's intent beats a `[sandbox_workspace_write] network_access = true` in
@@ -221,7 +244,7 @@ Two combinations to know:
   altogether, so no tier is held whatever was requested.
 
 `restricted` is rejected on codex instead of being quietly rounded to `none` or
-`full`. claude and opencode accept every tier without failing — callers pass one
+`full`. claude, opencode, and pi accept every tier without failing — callers pass one
 tier across mixed harnesses.
 
 **`network_effective` never claims more restriction than dash-p can prove.**

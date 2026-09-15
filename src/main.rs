@@ -7,9 +7,11 @@
 //! was actually enforced -- the two things every harness is otherwise vague
 //! about. Commands: `run` (default; bare prompt is sugar), `list`,
 //! `capabilities`. Adapters live in `src/adapters/` (claude via `claude -p`, or
-//! the undocumented `--pty` drive with a Stop hook; codex via `codex exec`).
+//! the undocumented `--pty` drive with a Stop hook; codex via `codex exec`;
+//! opencode via `opencode run`; pi via `pi -p --mode json`).
 
 mod adapters;
+mod ansi;
 mod args;
 mod command;
 mod dec;
@@ -101,11 +103,17 @@ fn run(mut opts: Options) -> ExitCode {
     let adapter = match adapters::for_harness(&opts.harness, opts.pty) {
         Some(a) => a,
         None => {
+            let implemented: Vec<&str> = harness::KNOWN_NAMES
+                .iter()
+                .copied()
+                .filter(|n| adapters::for_harness(&harness::Harness::parse(n), false).is_some())
+                .collect();
             eprintln!(
                 "dash-p: the '{}' harness is recognised but not implemented yet \
-                 (today: claude, or a path to a claude-compatible binary). \
+                 (implemented: {}, or a path to a claude-compatible binary). \
                  Recognised names: {}.",
                 opts.harness.name(),
+                implemented.join(", "),
                 harness::KNOWN_NAMES.join(", ")
             );
             write_meta_file(

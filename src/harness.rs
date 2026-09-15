@@ -1,13 +1,11 @@
 //! Selection of which agent CLI ("harness") dash-p drives.
 //!
 //! dash-p aims to be one non-interactive interface in front of any coding
-//! agent. Today only the Claude protocol is implemented -- by default via
-//! `claude -p` (print mode), or, with the undocumented `--pty` flag, by
-//! spawning the interactive TUI under a PTY, injecting a Stop hook via
-//! `--settings`, and capturing the final assistant message. The other names
-//! below are recognised and reserved so the `--harness` surface is stable as
-//! backends are added; selecting one that isn't wired up yet fails fast with a
-//! clear message (see [`crate::adapters::for_harness`]).
+//! agent. claude, codex, opencode, and pi are implemented (see
+//! [`crate::adapters`]). The remaining names below are recognised and reserved
+//! so the `--harness` surface is stable as backends are added; selecting one
+//! that isn't wired up yet fails fast with a clear message (see
+//! [`crate::adapters::for_harness`]).
 //!
 //! A value that is not a known name is treated as a path/binary and driven with
 //! the Claude protocol, so a fork or wrapper of `claude` can be pointed at

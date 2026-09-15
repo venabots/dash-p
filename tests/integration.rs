@@ -480,10 +480,10 @@ fn codex_rejects_restricted_before_spawning() {
     assert!(stderr.contains("restricted"), "stderr: {stderr}");
 }
 
-/// `capabilities` must admit that claude and opencode never enforce a tier.
+/// `capabilities` must admit that claude, opencode, and pi never enforce a tier.
 #[test]
 fn capabilities_admit_the_unenforcing_harnesses() {
-    for harness in ["claude", "opencode"] {
+    for harness in ["claude", "opencode", "pi"] {
         let out = run(&["capabilities", "--harness", harness]);
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(
@@ -509,7 +509,7 @@ fn every_harness_accepts_every_tier_except_codex_restricted() {
         eprintln!("skipping (set DASHP_E2E=1)");
         return;
     }
-    for harness in ["claude", "opencode", "codex"] {
+    for harness in ["claude", "opencode", "pi", "codex"] {
         for tier in ["none", "restricted", "full"] {
             let out = run(&[
                 "-H", harness, "--network", tier,
