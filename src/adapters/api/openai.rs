@@ -40,16 +40,28 @@ pub fn message_request(call: &Call) -> HttpRequest {
         .chain(std::iter::once(json!({ "role": "user", "content": call.prompt })))
         .collect();
     let mut body = json!({ "model": call.model, "messages": messages });
-    // Optional here, unlike Anthropic. `max_completion_tokens` replaced the
-    // deprecated `max_tokens`, which newer reasoning models reject.
+    // Optional here, unlike Anthropic.
     if let Some(cap) = call.max_tokens {
-        body["max_completion_tokens"] = json!(cap);
+        body[token_cap_field(call.base_url)] = json!(cap);
     }
     HttpRequest {
         url: format!("{}/chat/completions", call.base_url),
         headers: vec![auth_header(call.credential), ("content-type", "application/json".to_string())],
         body: Some(body.to_string()),
     }
+}
+
+/// OpenAI itself reads `max_completion_tokens`, which replaced `max_tokens`, and
+/// its reasoning models reject `max_tokens`. Compatible servers such as Ollama
+/// read only `max_tokens`. The host decides which one the server understands.
+fn token_cap_field(base_url: &str) -> &'static str {
+    let host = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or_default();
+    if host.eq_ignore_ascii_case("api.openai.com") { "max_completion_tokens" } else { "max_tokens" }
 }
 
 pub fn models_request(base_url: &str, credential: &Credential) -> HttpRequest {
@@ -199,8 +211,23 @@ mod tests {
         let body: Value = serde_json::from_str(message_request(&full).body.as_deref().unwrap()).unwrap();
         assert_eq!(body["messages"][0], json!({ "role": "system", "content": "be brief" }));
         assert_eq!(body["messages"][1]["role"], "user");
-        assert_eq!(body["max_completion_tokens"], 256);
-        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_tokens"], 256);
+    }
+
+    #[test]
+    fn the_token_cap_field_matches_what_the_server_reads() {
+        // OpenAI's reasoning models reject `max_tokens`; Ollama and other
+        // compatible servers read only `max_tokens`.
+        let c = Credential::bearer(API_KEY_ENV, "sk-1".into());
+        let cap_fields = |base_url: &str| -> Vec<String> {
+            let req = message_request(&Call { base_url, max_tokens: Some(64), ..call(&c) });
+            let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+            ["max_tokens", "max_completion_tokens"].into_iter().filter(|k| body.get(k).is_some()).map(str::to_string).collect()
+        };
+        assert_eq!(cap_fields("https://api.openai.com/v1"), vec!["max_completion_tokens"]);
+        assert_eq!(cap_fields("http://localhost:11434/v1"), vec!["max_tokens"]);
+        assert_eq!(cap_fields("https://openrouter.ai/api/v1"), vec!["max_tokens"]);
+        assert_eq!(cap_fields("https://api.openai.com.evil.example/v1"), vec!["max_tokens"]);
     }
 
     #[test]
