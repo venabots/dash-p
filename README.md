@@ -10,6 +10,7 @@ dash-p --output-format json "summarize this" < diff.txt
 dash-p --output-format stream-json "audit src/" | jq .
 dash-p --model opus "explain quicksort to a 10-year-old"
 dash-p --harness claude "which harness am I?"
+dash-p -H openai-api --base-url http://localhost:11434/v1 --model qwen3 < review-prompt.txt
 ```
 
 If no prompt argument is given, the prompt is read from stdin.
@@ -47,9 +48,9 @@ output-modes: text, json, stream-json
 
 ## Harnesses
 
-`-H` / `--harness <name|path>` selects which agent CLI to drive. (`--agent` is
-left alone so it forwards to claude's own `--agent <subagent>` flag.) Implemented
-today:
+`-H` / `--harness <name|path>` selects which agent CLI, or which model API, to
+drive. (`--agent` is left alone so it forwards to claude's own
+`--agent <subagent>` flag.) Implemented today:
 
 - **`claude`** (default) — `claude -p` print mode, a plain subprocess.
   Authoritative metadata: model, usage, and cost come straight from claude's
@@ -67,6 +68,25 @@ today:
   call failed before that reports `unknown`.
   Usage includes the model calls that compaction and tools make. pi has no
   sandbox, so `--perms read-only` is `agent-policy` at best — see Permissions.
+- **`anthropic-api`** — the Anthropic Messages API, called over HTTP. No binary,
+  no agent loop, no tools: one request, one answer.
+- **`openai-api`** — OpenAI Chat Completions, called over HTTP, the same way.
+
+The two API harnesses are named for the **wire format**, not a vendor, because
+many providers conform to one of them. Point one at a provider with `--base-url`
+(else `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`), and name the variable that holds
+its key with `--api-key-env`:
+
+| harness         | default base URL            | key (default)                                         |
+| --------------- | --------------------------- | ----------------------------------------------------- |
+| `anthropic-api` | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` (`x-api-key`), else `ANTHROPIC_AUTH_TOKEN` (bearer) |
+| `openai-api`    | `https://api.openai.com/v1` | `OPENAI_API_KEY` (bearer; any value for a keyless local server) |
+
+An API harness has **no default model**: pass `--model`, or the run exits 31.
+`list models -H <api-harness>` asks the provider which models your key can use.
+The model sees only the prompt (and `--system-prompt`), so a prompt that assumes
+a workspace, such as "audit src/", gets an answer from a model that cannot see
+one. Put the content in the prompt itself, for example a prompt file on stdin.
 
 `gemini` is recognised and reserved (selecting it fails fast until it's wired
 up). A value that isn't a known name is treated as a path to a
@@ -85,7 +105,9 @@ and parses the result envelope (answer, usage, cost, and the `modelUsage` key
 that gives the authoritative model). codex similarly runs `codex exec --json`,
 opencode runs `opencode run --format json`, and pi runs `pi -p --mode json`;
 each folds its JSONL event stream into the same answer + metadata envelope.
-Neither needs a PTY.
+None of them needs a PTY. The API harnesses make one HTTP request, held to the
+same `--timeout` and interrupts, and read the model, usage, and id from the
+response.
 
 The **`--pty`** fallback is the original mechanism — driving the interactive TUI
 under a PTY, for environments where `claude -p` doesn't work:
@@ -115,6 +137,10 @@ under a PTY, for environments where `claude -p` doesn't work:
 --network <none|restricted|full>           network tier (by intent)
 --require-enforcement <os-sandbox|any>     demand an enforcement class (else exit 32)
 --cwd <path>                               working directory for the child
+--base-url <url>                           API harnesses: provider URL
+--api-key-env <var>                        API harnesses: env var that holds the key
+--max-tokens <n>                           API harnesses: output token cap
+                                           (anthropic-api default 16000)
 --meta-file <path>                         write the run-metadata envelope here
 --timeout <seconds>                        wrapper wall-time cap (default 300)
 --pty                                      drive the interactive TUI under a PTY
@@ -128,7 +154,9 @@ Unrecognised flags are forwarded to `claude`. `-p`/`--print` is accepted but
 ignored — dash-p already emulates print mode, so the flag is redundant, and
 swallowing it lets callers that invoke `claude -p "..."` point at dash-p
 unchanged. A user-supplied `--settings` is rejected (we inject our own settings
-for the Stop hook).
+for the Stop hook). The API harnesses read `--system-prompt`, and refuse to run
+on a CLI harness with `--base-url`, `--api-key-env`, or `--max-tokens` (exit 2)
+rather than ignore them.
 
 `--model default` is the explicit way to ask for the harness's own default
 (reported as `model_requested: "default"`); any other value passes through and
@@ -152,7 +180,10 @@ achieved — honestly, instead of a uniform-looking flag that lies.
 | `workspace-write` | `--sandbox workspace-write` (os-sandbox) | bypassPermissions (none)             | pi's default tools (none)                  |
 | `full`            | `--sandbox danger-full-access` (none)    | bypassPermissions (none)             | pi's default tools (none)                  |
 
-opencode reports `none` for every tier.
+opencode reports `none` for every tier. The API harnesses report **`no-tools`**
+for every tier: the model has no tools, so nothing it returns runs. `no-tools`
+meets `--require-enforcement os-sandbox`. A write tier also warns on stderr,
+because the model cannot change anything.
 
 `--require-enforcement os-sandbox` makes the difference enforceable: it fails
 fast (exit 32) when the harness can't meet the demand, before anything runs.
@@ -245,7 +276,8 @@ Two combinations to know:
 
 `restricted` is rejected on codex instead of being quietly rounded to `none` or
 `full`. claude, opencode, and pi accept every tier without failing — callers pass one
-tier across mixed harnesses.
+tier across mixed harnesses. The API harnesses accept every tier too, and hold
+it as `network_effective: "none"` with `network_enforcement: "no-tools"`.
 
 **`network_effective` never claims more restriction than dash-p can prove.**
 When nothing enforces the tier, the run really does have an open network, so the
@@ -282,7 +314,7 @@ that is actually held.
   The policy fields separate what was asked for from what was actually done:
   `perms`/`network` are the requested tiers, `network_effective` is the tier
   that really applied, and `enforcement`/`network_enforcement` are the classes
-  achieved — `os-sandbox`, `agent-policy`, or `none`. A caller can therefore
+  achieved — `os-sandbox`, `no-tools`, `agent-policy`, or `none`. A caller can therefore
   tell a real sandbox from a flag that did nothing. The two cases to branch on:
 
   - `network_enforcement: "os-sandbox"` — the tier in `network_effective` is
@@ -292,7 +324,8 @@ that is actually held.
     `network_effective` reads `"full"`. Never an echo of the request.
 
   All five are `null` when the tier was not requested.
-  `drive` is adapter-provided — `"print"` (claude native), `"exec"` (codex), or
+  `drive` is adapter-provided — `"print"` (claude native), `"exec"` (codex,
+  opencode, pi), `"api"` (the API harnesses, whose `harness_version` is `null`), or
   `"pty"` for the `--pty` fallback (`"unknown"` when no adapter ran) — so a
   `"pty"` run's `unknown`/0 model+usage reads as a mode limitation, not missing
   data (and it never claims `"pty"` for a harness with no PTY drive).
@@ -310,7 +343,7 @@ Exit codes are a stable API orchestrators can branch on.
 | `31`  | `invalid-model`           | Harness rejected the requested model.         |
 | `32`  | `enforcement-unsupported` | Harness can't meet `--require-enforcement`.   |
 | `130` | `interrupted`             | Interrupted (SIGINT/SIGTERM).                 |
-| `2`   | `internal`                | Wrapper internal error (spawn/PTY/IO).        |
+| `2`   | `internal`                | Wrapper internal error (spawn/PTY/IO), or an API harness with no key. |
 
 ## Caveats
 
@@ -325,6 +358,8 @@ Exit codes are a stable API orchestrators can branch on.
   lines as `claude` flushes them, then a trailing `result` envelope.
   Per-token streaming needs `claude -p --include-partial-messages`, which is
   print-mode only.
+- **API harnesses report `total_cost_usd: 0`.** A provider's response has usage
+  but no price, and dash-p does not guess one.
 - **API instability.** `claude` is not designed to be driven this way. A
   release that changes the hook payload or adds a new startup terminal probe
   can break this; failures surface rather than hide.

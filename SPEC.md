@@ -74,6 +74,11 @@ argv -> hook harness (FIFO + relay script + --settings)
 | `adapters/exec.rs`          | Shared subprocess loop: spawn, stdin prompt, stderr tail, timeout/interrupt. |
 | `adapters/opencode.rs`      | opencode adapter: `opencode run --format json`, fold events (no OS sandbox). |
 | `adapters/pi.rs`            | pi adapter: `pi -p --mode json`, prompt on stdin, fold events (no sandbox).  |
+| `adapters/api/mod.rs`       | API adapters: one HTTP call per run, no tools; credential and base-URL rules. |
+| `adapters/api/http.rs`      | The HTTP call (ureq) on a worker thread, held to `--timeout` and interrupts. |
+| `adapters/api/anthropic.rs` | Anthropic Messages API: request, response, and error mapping.                |
+| `adapters/api/openai.rs`    | OpenAI Chat Completions: request, response, and error mapping.               |
+| `ansi.rs`                   | Terminal escape removal for text read from a harness.                        |
 | `dec.rs`                    | Stateful DEC/XTerm query responder (carry buffer across reads).              |
 | `hook.rs`                   | Temp dir + FIFO + relay script + inline `--settings` JSON; payload parse.    |
 | `pty.rs`                    | PTY spawn (execs argv directly — no `sh -c`).                                |
@@ -88,7 +93,9 @@ Adapters live in `src/adapters/`: each backend agent CLI implements the
 hook) is one such adapter; harnesses with a real non-interactive mode (codex,
 opencode, pi) are plain subprocess adapters with no PTY/hook machinery. They
 share one drive loop (`adapters/exec.rs`) and differ only in argv, where the
-prompt goes, and how the event stream folds.
+prompt goes, and how the event stream folds. The API harnesses (`anthropic-api`,
+`openai-api`) spawn nothing: they make one HTTP request in the format they are
+named for, and report `no-tools` for every tier.
 
 ### 2.1 Concurrency
 
@@ -161,7 +168,9 @@ authoritatively:
 
 `--perms`/`--network` request a tier by intent (`policy.rs`). Each adapter maps
 the tier to its harness's native mechanism and reports the **enforcement
-class** it actually achieves — `os-sandbox`, `agent-policy`, or `none`:
+class** it actually achieves — `os-sandbox`, `no-tools`, `agent-policy`, or
+`none`. `no-tools` means the model has no tools at all, so it meets an
+`os-sandbox` demand:
 
 | intent            | codex                          | enforcement | claude                | enforcement  |
 | ----------------- | ------------------------------ | ----------- | --------------------- | ------------ |
@@ -171,7 +180,8 @@ class** it actually achieves — `os-sandbox`, `agent-policy`, or `none`:
 
 pi has no sandbox. `read-only` passes `--tools read,grep,find,ls` (agent-policy);
 the write tiers keep pi's default tools and report `none`. opencode reports
-`none` for every tier.
+`none` for every tier. The API harnesses report `no-tools` for every tier, and
+`NetworkPlan::no_tools()` for every network tier (`effective: none`).
 
 claude's `read-only` denies the mutating tools
 (`--disallowedTools "Edit Write NotebookEdit Bash WebFetch WebSearch"`) rather
