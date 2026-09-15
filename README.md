@@ -22,6 +22,7 @@ dash-p "<prompt>"                 # sugar for `run` with defaults
 dash-p run [flags] -- "<prompt>"  # explicit run
 dash-p list harnesses             # installed + implemented/reserved + version
 dash-p list models [--harness X]  # best-effort model discovery
+                                  # (API harnesses: [--base-url U] [--api-key-env V])
 dash-p capabilities [--harness X] # per-harness perms->enforcement, network, outputs
 dash-p --help | --version
 ```
@@ -79,11 +80,14 @@ its key with `--api-key-env`:
 
 | harness         | default base URL            | key (default)                                         |
 | --------------- | --------------------------- | ----------------------------------------------------- |
-| `anthropic-api` | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` (`x-api-key`), else `ANTHROPIC_AUTH_TOKEN` (bearer) |
+| `anthropic-api` | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` (`x-api-key`), else `ANTHROPIC_AUTH_TOKEN` (bearer). A `--api-key-env` name that ends in `AUTH_TOKEN` is sent as a bearer token. |
 | `openai-api`    | `https://api.openai.com/v1` | `OPENAI_API_KEY` (bearer; any value for a keyless local server) |
 
 An API harness has **no default model**: pass `--model`, or the run exits 31.
-`list models -H <api-harness>` asks the provider which models your key can use.
+`list models -H <api-harness>` asks the provider which models your key can use,
+and takes the same `--base-url` and `--api-key-env`. A key the provider echoes
+back in an error is printed as `[redacted]`, and redirects are not followed, so
+the key only goes to the base URL you chose.
 The model sees only the prompt (and `--system-prompt`), so a prompt that assumes
 a workspace, such as "audit src/", gets an answer from a model that cannot see
 one. Put the content in the prompt itself, for example a prompt file on stdin.
@@ -182,8 +186,15 @@ achieved — honestly, instead of a uniform-looking flag that lies.
 
 opencode reports `none` for every tier. The API harnesses report **`no-tools`**
 for every tier: the model has no tools, so nothing it returns runs. `no-tools`
-meets `--require-enforcement os-sandbox`. A write tier also warns on stderr,
-because the model cannot change anything.
+meets `--require-enforcement os-sandbox`, and a bypass flag does not remove it,
+because there is no sandbox to remove. A write tier warns on stderr, because the
+model cannot change anything.
+
+**What `no-tools` covers, exactly.** It covers this machine: nothing the model
+returns is run, written, or fetched here. It does not cover the provider's side.
+Some models search or fetch the web inside the provider with no `tools` field in
+the request (search models, OpenRouter `:online` routes), and dash-p can neither
+see nor stop that.
 
 `--require-enforcement os-sandbox` makes the difference enforceable: it fails
 fast (exit 32) when the harness can't meet the demand, before anything runs.
@@ -277,7 +288,8 @@ Two combinations to know:
 `restricted` is rejected on codex instead of being quietly rounded to `none` or
 `full`. claude, opencode, and pi accept every tier without failing — callers pass one
 tier across mixed harnesses. The API harnesses accept every tier too, and hold
-it as `network_effective: "none"` with `network_enforcement: "no-tools"`.
+it as `network_effective: "none"` with `network_enforcement: "no-tools"`, for
+this machine only (see What `no-tools` covers).
 
 **`network_effective` never claims more restriction than dash-p can prove.**
 When nothing enforces the tier, the run really does have an open network, so the

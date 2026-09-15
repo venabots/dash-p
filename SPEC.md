@@ -181,7 +181,10 @@ class** it actually achieves — `os-sandbox`, `no-tools`, `agent-policy`, or
 pi has no sandbox. `read-only` passes `--tools read,grep,find,ls` (agent-policy);
 the write tiers keep pi's default tools and report `none`. opencode reports
 `none` for every tier. The API harnesses report `no-tools` for every tier, and
-`NetworkPlan::no_tools()` for every network tier (`effective: none`).
+`NetworkPlan::no_tools()` for every network tier (`effective: none`). The claim
+covers this machine: a provider can still reach the web on its own side, which
+dash-p cannot observe. `Adapter::has_tools` is false for them, so a bypass flag
+does not downgrade the class.
 
 claude's `read-only` denies the mutating tools
 (`--disallowedTools "Edit Write NotebookEdit Bash WebFetch WebSearch"`) rather
