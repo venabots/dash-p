@@ -86,8 +86,10 @@ its key with `--api-key-env`:
 An API harness has **no default model**: pass `--model`, or the run exits 31.
 `--max-tokens` is required by the Anthropic format, so `anthropic-api` sends
 16000 when it is not set. `openai-api` sends it only when set: as
-`max_completion_tokens` to api.openai.com, and as `max_tokens` to any other
-host, because compatible servers such as Ollama read only that field.
+`max_completion_tokens` to OpenAI's own hosts and Azure OpenAI, and as
+`max_tokens` to any other host, because compatible servers such as Ollama read
+only that field. TLS trusts the platform's certificate store, so a gateway with
+a private CA or a TLS-inspecting proxy works.
 `list models -H <api-harness>` asks the provider which models your key can use,
 and takes the same `--base-url` and `--api-key-env`. A key of 20 or more
 characters that the provider echoes back is printed as `[redacted]`. A shorter
