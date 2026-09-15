@@ -80,7 +80,7 @@ its key with `--api-key-env`:
 
 | harness         | default base URL            | key (default)                                         |
 | --------------- | --------------------------- | ----------------------------------------------------- |
-| `anthropic-api` | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` (`x-api-key`), else `ANTHROPIC_AUTH_TOKEN` (bearer). A `--api-key-env` name that ends in `AUTH_TOKEN` is sent as a bearer token. |
+| `anthropic-api` | `https://api.anthropic.com` | `ANTHROPIC_AUTH_TOKEN` (bearer), else `ANTHROPIC_API_KEY` (`x-api-key`), the same order as Claude Code. A `--api-key-env` name that ends in `AUTH_TOKEN` is sent as a bearer token. |
 | `openai-api`    | `https://api.openai.com/v1` | `OPENAI_API_KEY` (bearer; any value for a keyless local server) |
 
 An API harness has **no default model**: pass `--model`, or the run exits 31.
@@ -89,9 +89,11 @@ An API harness has **no default model**: pass `--model`, or the run exits 31.
 `max_completion_tokens` to api.openai.com, and as `max_tokens` to any other
 host, because compatible servers such as Ollama read only that field.
 `list models -H <api-harness>` asks the provider which models your key can use,
-and takes the same `--base-url` and `--api-key-env`. A key the provider echoes
-back in an error is printed as `[redacted]`, and redirects are not followed, so
-the key only goes to the base URL you chose.
+and takes the same `--base-url` and `--api-key-env`. A key of 20 or more
+characters that the provider echoes back is printed as `[redacted]`. A shorter
+value counts as a placeholder for a keyless server and is left as it is.
+Redirects are not followed, so the key only goes to the base URL you chose.
+`--cwd` and `--pty` have no effect on an API harness, and dash-p says so.
 The model sees only the prompt (and `--system-prompt`), so a prompt that assumes
 a workspace, such as "audit src/", gets an answer from a model that cannot see
 one. Put the content in the prompt itself, for example a prompt file on stdin.
