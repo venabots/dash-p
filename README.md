@@ -60,10 +60,11 @@ today:
   reported as `agent-policy` at best and `model_resolved` as `unknown` — see
   Caveats.
 - **`pi`** — `pi -p --mode json`, a plain subprocess. The prompt goes on stdin,
-  because pi reads any argument that starts with `@` as a file to attach. Model,
-  usage, and cost come from pi's own events, and `model_resolved` is
-  `provider/model` as the provider reported it. pi has no sandbox, so
-  `--perms read-only` is `agent-policy` at best — see Permissions.
+  because pi reads any argument that starts with `@` as a file to attach. Usage
+  and cost come from pi's own events. `model_resolved` is `provider/model`: the
+  model the provider reported when pi relays it, else the model id pi sent. A
+  failed call reports `unknown`. pi has no sandbox, so `--perms read-only` is
+  `agent-policy` at best — see Permissions.
 
 `gemini` is recognised and reserved (selecting it fails fast until it's wired
 up). A value that isn't a known name is treated as a path to a
@@ -206,8 +207,8 @@ filters extension and custom tools, so the model is offered nothing that writes
 or runs commands. pi itself still runs with your permissions:
 
 - **Extensions.** Global extensions in `~/.pi/agent/extensions` still load, and
-  their event handlers run unsandboxed. Only the tools they register are
-  filtered.
+  so do a project's `.pi/extensions` when you trusted that project in pi. Their
+  event handlers run unsandboxed. Only the tools they register are filtered.
 - **Reads.** The read tools can read any file your user can, not only the
   working directory.
 
