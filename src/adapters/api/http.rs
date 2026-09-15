@@ -40,13 +40,16 @@ pub fn send(request: HttpRequest, opts: &Options) -> Result<Outcome, DriverError
         let _ = tx.send(perform(&agent, request));
     });
     loop {
+        // Wait first, then check: a response that lands during the wait but
+        // after an interrupt or the deadline must not count as a success.
+        let received = rx.recv_timeout(POLL);
         if signals::interrupted() {
             return Err(DriverError::Interrupted);
         }
         if start.elapsed() > timeout {
             return Err(DriverError::StopTimeout);
         }
-        match rx.recv_timeout(POLL) {
+        match received {
             Ok(outcome) => return Ok(outcome),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -199,6 +202,16 @@ pub mod tests {
         assert!(matches!(err, DriverError::StopTimeout), "got: {err}");
         assert!(started.elapsed() < Duration::from_secs(3));
         drop(listener);
+    }
+
+    #[test]
+    fn a_response_after_the_deadline_is_a_timeout_not_a_success() {
+        let (base, _) = serve_raw(|| {
+            thread::sleep(Duration::from_millis(400));
+            "HTTP/1.1 200 X\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}".to_string()
+        });
+        let err = send(post(base), &opts(300)).err().unwrap();
+        assert!(matches!(err, DriverError::StopTimeout), "got: {err}");
     }
 
     #[test]
