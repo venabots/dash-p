@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::adapters::{DriverError, procgroup};
+use crate::ansi::strip_csi;
 use crate::args::{Options, OutputFormat};
 use crate::signals;
 use crate::transcript::Summary;
@@ -190,7 +191,7 @@ pub fn finish_stream(
 /// Read in fixed-size chunks (not `read_until`) so a newline-free flood cannot
 /// buffer an unbounded line before the cap applies. Kept as raw bytes: a
 /// mid-UTF-8 cut or a stray non-UTF-8 byte must not abort the drain, so decoding
-/// is lossy and happens only when surfacing. The thread is never joined -- a
+/// is lossy and happens only when surfacing, with terminal escapes removed. The thread is never joined -- a
 /// tool descendant that inherits stderr and outlives the harness could hang a
 /// join forever -- so a snapshot waits a bounded time instead.
 struct StderrTail {
@@ -232,7 +233,7 @@ impl StderrTail {
         }
         self.bytes
             .lock()
-            .map(|t| String::from_utf8_lossy(&t).trim().to_string())
+            .map(|t| strip_csi(&t).trim().to_string())
             .unwrap_or_default()
     }
 }
@@ -280,6 +281,15 @@ mod tests {
             run_jsonl(sh("echo 'No API key found' >&2; exit 1"), None, &opts(), None, |_| {}).unwrap();
         assert!(!done.success);
         assert_eq!(done.stderr_tail(), "No API key found");
+    }
+
+    #[test]
+    fn the_stderr_tail_drops_terminal_colors() {
+        // pi colors its stderr when FORCE_COLOR is set. The escape codes would
+        // break matching on `Error:` and end up in the answer.
+        let script = r#"printf '\033[31mError: Model "x" not found\033[39m\n' >&2; exit 1"#;
+        let done = run_jsonl(sh(script), None, &opts(), None, |_| {}).unwrap();
+        assert_eq!(done.stderr_tail(), r#"Error: Model "x" not found"#);
     }
 
     #[test]
