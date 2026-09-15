@@ -601,3 +601,29 @@ fn codex_add_dir_grants_a_writable_root() {
     // The sandbox is still on: the pin did not simply open everything up.
     assert_eq!(meta["enforcement"], "os-sandbox", "meta: {meta}");
 }
+
+/// An API harness has no default model, so a run without `--model` stops with
+/// invalid-model before it sends anything. Hermetic: no request is made.
+#[test]
+fn an_api_harness_without_a_model_exits_31_before_any_request() {
+    for harness in ["anthropic-api", "openai-api"] {
+        let out = run(&["-H", harness, "--base-url", "http://127.0.0.1:9", "--", "hi"]);
+        assert_eq!(
+            out.status.code(),
+            Some(31),
+            "{harness}: stdout {} stderr {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// API-harness flags mean nothing to a CLI harness; the run is refused rather
+/// than started with a setting the caller thinks is in effect.
+#[test]
+fn api_flags_are_refused_on_a_cli_harness() {
+    let out = run(&["-H", "codex", "--base-url", "http://127.0.0.1:9", "--", "hi"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--base-url"), "stderr: {stderr}");
+}
