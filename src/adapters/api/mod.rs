@@ -255,6 +255,10 @@ fn run(
             (Reply::failure(format!("{harness}: request to {url} failed: {why}")), String::new())
         }
     };
+    // A provider can echo the key back in an error. Nothing dash-p prints may
+    // carry it: not the answer, not the replay, not stream-json.
+    let reply = Reply { text: redact(&reply.text, &credential), ..reply };
+    let replay = redact(&replay, &credential);
     let api_ms = sent.elapsed().as_millis() as u64;
 
     if opts.output_format == OutputFormat::StreamJson
@@ -301,6 +305,14 @@ fn outcome(reply: Reply, replay: String, api_ms: u64, start: Instant) -> RunOutc
     }
 }
 
+/// `text` with every copy of the credential replaced.
+fn redact(text: &str, credential: &Credential) -> String {
+    if credential.value.is_empty() {
+        return text.to_string();
+    }
+    text.replace(&credential.value, "[redacted]")
+}
+
 /// The response body as one JSONL line: compact JSON when it parses, else the
 /// text as a JSON string, so stream-json stays one object per line.
 fn one_line(body: &str) -> String {
@@ -337,8 +349,9 @@ pub fn credential_status(protocol: Protocol) -> Result<String, String> {
 pub fn list_models(protocol: Protocol) -> Result<Vec<String>, String> {
     let credential = protocol.credential(None, &env_var)?;
     let base_url = base_url(protocol, &Options::default(), &env_var);
-    let body = http::get(protocol.models_request(&base_url, &credential))?;
-    protocol.parse_models(&body)
+    http::get(protocol.models_request(&base_url, &credential))
+        .and_then(|body| protocol.parse_models(&body))
+        .map_err(|why| redact(&why, &credential))
 }
 
 #[cfg(test)]
@@ -412,6 +425,20 @@ mod tests {
         let raw = request.recv().unwrap();
         assert!(raw.starts_with("POST /v1/chat/completions "), "{raw}");
         assert!(raw.to_ascii_lowercase().contains("authorization: bearer sk-test"), "{raw}");
+    }
+
+    #[test]
+    fn a_key_the_provider_echoes_back_never_reaches_the_output() {
+        let (base, _) = serve_once(401, r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key: sk-test-echoed"}}"#);
+        let env = env_with(vec![(anthropic::API_KEY_ENV, "sk-test-echoed".into())]);
+        let o = Options { output_format: OutputFormat::StreamJson, ..opts(&base) };
+        let mut buf = Vec::new();
+        let out = run(Protocol::Anthropic, &o, &env, Some(&mut buf)).unwrap();
+        let streamed = String::from_utf8(buf).unwrap();
+        for text in [&out.summary.final_text, &out.summary.jsonl_replay, &streamed] {
+            assert!(!text.contains("sk-test-echoed"), "the key leaked: {text}");
+        }
+        assert!(out.summary.final_text.contains("[redacted]"), "{}", out.summary.final_text);
     }
 
     #[test]
