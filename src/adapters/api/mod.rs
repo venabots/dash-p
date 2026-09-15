@@ -104,8 +104,8 @@ impl Protocol {
 }
 
 /// A credential and the environment variable it came from. The value is never
-/// printed; the source name is what diagnostics show.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// printed; the source name is what diagnostics show, `Debug` included.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Credential {
     pub source: String,
     pub value: String,
@@ -123,6 +123,16 @@ impl Credential {
     }
 }
 
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credential")
+            .field("source", &self.source)
+            .field("value", &"[redacted]")
+            .field("bearer", &self.bearer)
+            .finish()
+    }
+}
+
 /// Everything one message request needs, already resolved.
 pub struct Call<'a> {
     base_url: &'a str,
@@ -134,12 +144,24 @@ pub struct Call<'a> {
 }
 
 /// One HTTP request, built by a protocol and sent by `http`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct HttpRequest {
     url: String,
     headers: Vec<(&'static str, String)>,
     /// `Some` for a POST, `None` for a GET.
     body: Option<String>,
+}
+
+/// Header values carry the credential, so `Debug` shows only header names.
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| *name).collect();
+        f.debug_struct("HttpRequest")
+            .field("url", &self.url)
+            .field("headers", &names)
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 /// A response, read into the fields the envelope needs.
@@ -274,7 +296,7 @@ fn run(
     // the key: not the answer, the envelope, the replay, or stream-json.
     let (reply, replay) = match http::send(request, opts)? {
         http::Outcome::Response { status, body } => {
-            let body = redact(&body, &credential);
+            let body = redact_body(&body, &credential);
             (protocol.parse_reply(status, &body), one_line(&body))
         }
         http::Outcome::Failed(why) => {
@@ -330,22 +352,39 @@ fn outcome(reply: Reply, replay: String, api_ms: u64, start: Instant) -> RunOutc
 
 /// Shorter values are placeholders for keyless servers ("x", "ollama",
 /// "sk-no-key-required"), not secrets, and replacing them would cut them out of
-/// ordinary words. Real provider keys are 35 characters or more.
+/// ordinary words. Hosted provider keys are longer than this.
 const MIN_SECRET_LEN: usize = 20;
 
-/// `text` with every copy of the credential replaced: as sent, as a JSON
-/// string would escape it, and with `/` escaped as `\/`, which JSON allows.
+/// `text` with every copy of the credential replaced.
 fn redact(text: &str, credential: &Credential) -> String {
-    let secret = credential.value.as_str();
-    if secret.len() < MIN_SECRET_LEN {
+    if credential.value.len() < MIN_SECRET_LEN {
         return text.to_string();
     }
-    let quoted = Value::String(secret.to_string()).to_string();
-    let escaped = quoted[1..quoted.len() - 1].to_string();
-    let slash_escaped = escaped.replace('/', "\\/");
-    [secret.to_string(), escaped, slash_escaped]
-        .iter()
-        .fold(text.to_string(), |out, form| out.replace(form.as_str(), "[redacted]"))
+    text.replace(&credential.value, "[redacted]")
+}
+
+/// A response body with every copy of the credential replaced. A JSON body is
+/// decoded first, so a copy hidden behind any JSON escape (`\/`, `\u003d`) is
+/// caught in the decoded string; any other body is matched as raw text.
+fn redact_body(body: &str, credential: &Credential) -> String {
+    if credential.value.len() < MIN_SECRET_LEN {
+        return body.to_string();
+    }
+    match serde_json::from_str::<Value>(body) {
+        Ok(value) => redact_value(value, credential).to_string(),
+        Err(_) => redact(body, credential),
+    }
+}
+
+fn redact_value(value: Value, credential: &Credential) -> Value {
+    match value {
+        Value::String(s) => Value::String(redact(&s, credential)),
+        Value::Array(items) => Value::Array(items.into_iter().map(|v| redact_value(v, credential)).collect()),
+        Value::Object(fields) => Value::Object(
+            fields.into_iter().map(|(k, v)| (redact(&k, credential), redact_value(v, credential))).collect(),
+        ),
+        other => other,
+    }
 }
 
 /// The response body as one JSONL line: compact JSON when it parses, else the
@@ -400,7 +439,7 @@ fn list_models_with(
     let base_url = base_url(protocol, base_url_flag, env);
     match http::get(protocol.models_request(&base_url, &credential)) {
         http::Outcome::Response { status, body } => {
-            let body = redact(&body, &credential);
+            let body = redact_body(&body, &credential);
             if (200..300).contains(&status) {
                 protocol.parse_models(&body)
             } else {
@@ -537,8 +576,8 @@ mod tests {
         let out = run(Protocol::Anthropic, &opts(&base), &env, None).unwrap();
         assert!(!out.summary.final_text.contains("sk-ant-api03"), "{}", out.summary.final_text);
 
-        // JSON-escaped, and in the fields the envelope copies (id, model).
-        let body = r#"{"id":"sk-ant-api03\/0123456789abcdefghij","model":"sk-ant-api03/0123456789abcdefghij","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"#;
+        // JSON-escaped (`\/`, `\u0030`), and in the fields the envelope copies.
+        let body = r#"{"id":"sk-ant-api03\/0123456789abcdefghij","model":"sk-ant-api03/\u00301234567\u0038\u0039abcdefghij","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}"#;
         let (base, _) = serve_once(200, body);
         let out = run(Protocol::Anthropic, &opts(&base), &env, None).unwrap();
         for field in [&out.summary.session_id, &out.summary.model, &out.summary.jsonl_replay] {
@@ -606,6 +645,23 @@ mod tests {
                 assert_eq!(adapter.network_plan(None, network, bypass).unwrap(), NetworkPlan::no_tools());
             }
         }
+    }
+
+    #[test]
+    fn debug_output_never_shows_a_credential() {
+        let c = Credential::api_key("ANTHROPIC_API_KEY", "sk-ant-api03-debug-0123456789".into());
+        let shown = format!("{c:?}");
+        assert!(!shown.contains("debug-0123456789"), "{shown}");
+        assert!(shown.contains("ANTHROPIC_API_KEY"), "{shown}");
+        let req = anthropic::message_request(&Call {
+            base_url: "https://api.anthropic.com",
+            credential: &c,
+            model: "m",
+            prompt: "p",
+            system: None,
+            max_tokens: None,
+        });
+        assert!(!format!("{req:?}").contains("debug-0123456789"), "{req:?}");
     }
 
     #[test]
