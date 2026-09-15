@@ -50,6 +50,14 @@ pub struct Options {
     pub debug: bool,
     pub cols: u16,
     pub rows: u16,
+    /// API harnesses: the provider URL (`--base-url`), overriding the format's
+    /// base-URL variable and the vendor default.
+    pub base_url: Option<String>,
+    /// API harnesses: the environment variable that holds the key
+    /// (`--api-key-env`). The name, never the key: a flag value shows in `ps`.
+    pub api_key_env: Option<String>,
+    /// API harnesses: the output token cap (`--max-tokens`).
+    pub max_tokens: Option<u32>,
     /// Flags forwarded verbatim to the child `claude`.
     pub extra_args: Vec<String>,
 }
@@ -72,6 +80,9 @@ impl Default for Options {
             debug: false,
             cols: 120,
             rows: 40,
+            base_url: None,
+            api_key_env: None,
+            max_tokens: None,
             extra_args: Vec::new(),
         }
     }
@@ -195,6 +206,14 @@ pub fn parse(args: &[String]) -> Result<Options, ArgError> {
                 };
             }
             "--cwd" => opts.cwd = Some(value(inline, args, &mut i, flag)?.to_string()),
+            "--base-url" => opts.base_url = Some(value(inline, args, &mut i, flag)?.to_string()),
+            "--api-key-env" => {
+                opts.api_key_env = Some(value(inline, args, &mut i, flag)?.to_string());
+            }
+            "--max-tokens" => {
+                let v = value(inline, args, &mut i, flag)?;
+                opts.max_tokens = Some(v.parse().map_err(|_| ArgError::BadNumber(v.to_string()))?);
+            }
             "--meta-file" => opts.meta_file = Some(value(inline, args, &mut i, flag)?.to_string()),
             "--perms" => {
                 let v = value(inline, args, &mut i, flag)?;
@@ -255,6 +274,21 @@ pub fn parse(args: &[String]) -> Result<Options, ArgError> {
 
     opts.prompt = prompt_parts.join(" ");
     Ok(opts)
+}
+
+impl Options {
+    /// The API-harness flags this run set. They mean nothing to a CLI harness,
+    /// so a run that sets one there is refused rather than ignored.
+    pub fn api_only_flags(&self) -> Vec<&'static str> {
+        [
+            ("--base-url", self.base_url.is_some()),
+            ("--api-key-env", self.api_key_env.is_some()),
+            ("--max-tokens", self.max_tokens.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(flag, set)| set.then_some(flag))
+        .collect()
+    }
 }
 
 fn parse_output_format(v: &str) -> Result<OutputFormat, ArgError> {
@@ -480,6 +514,26 @@ mod tests {
         // The harness value is consumed, not leaked into the prompt or forwarded.
         assert_eq!(o.prompt, "hi");
         assert!(o.extra_args.is_empty());
+    }
+
+    #[test]
+    fn api_flags_are_parsed_and_reported() {
+        let o = parse(&v(&[
+            "-H", "anthropic-api",
+            "--base-url", "http://127.0.0.1:8080",
+            "--api-key-env=DEEPSEEK_API_KEY",
+            "--max-tokens", "512",
+            "hi",
+        ]))
+        .unwrap();
+        assert_eq!(o.harness, Harness::AnthropicApi);
+        assert_eq!(o.base_url.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(o.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+        assert_eq!(o.max_tokens, Some(512));
+        assert_eq!(o.api_only_flags(), vec!["--base-url", "--api-key-env", "--max-tokens"]);
+        assert_eq!(o.prompt, "hi");
+        assert!(parse(&v(&["hi"])).unwrap().api_only_flags().is_empty());
+        assert!(matches!(parse(&v(&["--max-tokens", "lots", "hi"])), Err(ArgError::BadNumber(_))));
     }
 
     #[test]

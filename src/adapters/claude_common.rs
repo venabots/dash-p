@@ -16,7 +16,8 @@ pub fn resolve_bin(harness: &Harness) -> String {
     {
         return b;
     }
-    harness.bin().to_string()
+    // Only claude and a custom path reach here, and both have a binary.
+    harness.bin().unwrap_or("claude").to_string()
 }
 
 /// Pin a relative, path-like program to an absolute path against the launch dir

@@ -74,7 +74,9 @@ fn main() -> ExitCode {
     match command {
         Command::Run(opts) => run(*opts),
         Command::ListHarnesses => render(command::list_harnesses),
-        Command::ListModels { harness } => render(|w| command::list_models(w, harness)),
+        Command::ListModels { harness, base_url, api_key_env } => {
+            render(|w| command::list_models(w, harness, base_url.as_deref(), api_key_env.as_deref()))
+        }
         Command::Capabilities { harness } => render(|w| command::capabilities(w, harness)),
         Command::Help => render(|w| w.write_all(command::HELP.as_bytes())),
         Command::Version => render(|w| {
@@ -132,6 +134,36 @@ fn run(mut opts: Options) -> ExitCode {
     };
     let drive = adapter.drive();
 
+    // API-harness flags mean nothing to a CLI harness. Ignoring one would run
+    // with a setting the caller believes is in effect.
+    let api_flags = opts.api_only_flags();
+    if !opts.harness.is_api() && !api_flags.is_empty() {
+        eprintln!(
+            "dash-p: {} can only be used with an API harness, not '{}'",
+            api_flags.join(", "),
+            opts.harness.name()
+        );
+        return ExitCode::from(2);
+    }
+    // `--cwd` and `--pty` shape a subprocess. Orchestrators pass `--cwd` to
+    // every harness, so an API run warns rather than refuses.
+    if opts.harness.is_api() && (opts.cwd.is_some() || opts.pty) {
+        eprintln!(
+            "dash-p: the '{}' harness makes one HTTP call; --cwd and --pty have no effect, and the model cannot see files",
+            opts.harness.name()
+        );
+    }
+    // The reverse: flags meant for an agent CLI mean nothing to an API call.
+    let cli_flags = adapters::api::unsupported_flags(&opts);
+    if opts.harness.is_api() && !cli_flags.is_empty() {
+        eprintln!(
+            "dash-p: the '{}' harness does not support {} (it reads only --system-prompt)",
+            opts.harness.name(),
+            cli_flags.join(", ")
+        );
+        return ExitCode::from(2);
+    }
+
     // No positional prompt: read it from stdin (so multiline prompts and pipes
     // work without shell escaping).
     if opts.prompt.is_empty() {
@@ -153,16 +185,12 @@ fn run(mut opts: Options) -> ExitCode {
     }
 
     // The enforcement class achieved for the requested perms tier (if any),
-    // reported in metadata. A bypass flag disables enforcement outright, so
-    // report `Unenforced` rather than the tier's nominal class (the preflight
-    // in `check_enforcement` rejects the same combination up front).
-    let perms_enforcement = opts.perms.map(|p| {
-        if opts.skip_permissions {
-            policy::Enforcement::Unenforced
-        } else {
-            adapter.perms_enforcement(p)
-        }
-    });
+    // reported in metadata. A bypass flag disables a sandbox or policy
+    // outright, so those report `Unenforced` rather than the tier's nominal
+    // class (the preflight in `check_enforcement` rejects the same combination
+    // up front). A harness with no tools has nothing to disable.
+    let perms_enforcement =
+        opts.perms.map(|p| adapters::perms_achieved(adapter.as_ref(), p, opts.skip_permissions));
 
     // Resolve `--network` against the harness before spawning: a tier the
     // harness cannot express at all (codex has no domain allowlist, so
@@ -187,6 +215,19 @@ fn run(mut opts: Options) -> ExitCode {
         }
     };
     let enforced = policy::Enforced { perms: perms_enforcement, network };
+
+    // A harness with no tools holds every tier, but a write tier also grants
+    // nothing: the model cannot edit files. Say so rather than let a caller
+    // expect edits that cannot happen.
+    if let (Some(perms @ (policy::Perms::WorkspaceWrite | policy::Perms::Full)), Some(policy::Enforcement::NoTools)) =
+        (opts.perms, perms_enforcement)
+    {
+        eprintln!(
+            "dash-p: the {} harness gives the model no tools; --perms {} cannot let it change anything",
+            opts.harness.name(),
+            perms.label(),
+        );
+    }
 
     // A tier the harness *can* express but not at the level asked for is
     // reported in the envelope -- warn on stderr too, so a human running by
