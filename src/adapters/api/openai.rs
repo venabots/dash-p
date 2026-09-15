@@ -53,7 +53,9 @@ pub fn message_request(call: &Call) -> HttpRequest {
 
 /// OpenAI itself reads `max_completion_tokens`, which replaced `max_tokens`, and
 /// its reasoning models reject `max_tokens`. Compatible servers such as Ollama
-/// read only `max_tokens`. The host decides which one the server understands.
+/// read only `max_tokens`. The host decides which one the server understands:
+/// OpenAI's own hosts (regional ones included) and Azure OpenAI get the new
+/// field, every other host the old one.
 fn token_cap_field(base_url: &str) -> &'static str {
     let host = base_url
         .split_once("://")
@@ -61,7 +63,9 @@ fn token_cap_field(base_url: &str) -> &'static str {
         .split(['/', ':'])
         .next()
         .unwrap_or_default();
-    if host.eq_ignore_ascii_case("api.openai.com") { "max_completion_tokens" } else { "max_tokens" }
+    let host = host.to_ascii_lowercase();
+    let is_openai = host == "api.openai.com" || host.ends_with(".openai.com") || host.ends_with(".openai.azure.com");
+    if is_openai { "max_completion_tokens" } else { "max_tokens" }
 }
 
 pub fn models_request(base_url: &str, credential: &Credential) -> HttpRequest {
@@ -227,6 +231,9 @@ mod tests {
             ["max_tokens", "max_completion_tokens"].into_iter().filter(|k| body.get(k).is_some()).map(str::to_string).collect()
         };
         assert_eq!(cap_fields("https://api.openai.com/v1"), vec!["max_completion_tokens"]);
+        assert_eq!(cap_fields("https://eu.api.openai.com/v1"), vec!["max_completion_tokens"]);
+        assert_eq!(cap_fields("https://myco.openai.azure.com/openai/v1"), vec!["max_completion_tokens"]);
+        assert_eq!(cap_fields("https://notopenai.com/v1"), vec!["max_tokens"]);
         assert_eq!(cap_fields("http://localhost:11434/v1"), vec!["max_tokens"]);
         assert_eq!(cap_fields("https://openrouter.ai/api/v1"), vec!["max_tokens"]);
         assert_eq!(cap_fields("https://api.openai.com.evil.example/v1"), vec!["max_tokens"]);
