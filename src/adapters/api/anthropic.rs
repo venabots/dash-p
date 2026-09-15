@@ -22,13 +22,17 @@ const DEFAULT_MAX_TOKENS: u32 = 16_000;
 /// The credential to send. An API key goes in `x-api-key`; a bearer token (an
 /// OAuth token or a proxy's token) goes in `Authorization`. Never both: the API
 /// rejects a request that carries two credentials.
+///
+/// A variable named with `--api-key-env` is a key, unless its name ends in
+/// `AUTH_TOKEN`, the `ANTHROPIC_AUTH_TOKEN` convention for a bearer token.
 pub fn credential(
     api_key_env: Option<&str>,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Credential, String> {
     if let Some(var) = api_key_env {
+        let as_credential = if var.ends_with("AUTH_TOKEN") { Credential::bearer } else { Credential::api_key };
         return env(var)
-            .map(|key| Credential::api_key(var, key))
+            .map(|value| as_credential(var, value))
             .ok_or_else(|| format!("--api-key-env {var} is not set"));
     }
     env(API_KEY_ENV)
@@ -69,7 +73,9 @@ pub fn message_request(call: &Call) -> HttpRequest {
 
 pub fn models_request(base_url: &str, credential: &Credential) -> HttpRequest {
     HttpRequest {
-        url: format!("{base_url}/v1/models"),
+        // One page of up to 1000, the most the API allows. The default page is
+        // 20, which would cut the list short with no sign of it.
+        url: format!("{base_url}/v1/models?limit=1000"),
         headers: vec![auth_header(credential), ("anthropic-version", API_VERSION.to_string())],
         body: None,
     }
@@ -81,30 +87,34 @@ pub fn parse_reply(status: u16, body: &str) -> Reply {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return Reply::failure(format!("{status}: {}", super::excerpt(body)));
     };
-    if !(200..300).contains(&status) {
+    // An error object is an error whatever the status says.
+    if !(200..300).contains(&status) || v.get("type").and_then(Value::as_str) == Some("error") {
         return parse_error(status, &v, body);
     }
+    let Some(blocks) = v.get("content").and_then(Value::as_array) else {
+        return Reply::failure(format!("{status}: response is not a message: {}", super::excerpt(body)));
+    };
     let str_of = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-    let text: String = v
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .collect()
-        })
-        .unwrap_or_default();
+    let text: String = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .collect();
     let usage = v.get("usage");
     let get = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64).unwrap_or(0);
-    // A refusal is HTTP 200, so the stop reason is the only signal.
-    let refused = v.get("stop_reason").and_then(Value::as_str) == Some("refusal");
+    // A refusal is HTTP 200, so the stop reason is the only signal. So is a
+    // cap reached before any text, which thinking can use up on its own.
+    let stop = v.get("stop_reason").and_then(Value::as_str).unwrap_or_default();
+    let refused = stop == "refusal";
+    let capped_empty = stop == "max_tokens" && text.is_empty();
     Reply {
-        text: if refused && text.is_empty() {
-            "the model declined to answer (stop_reason: refusal)".to_string()
-        } else {
-            text
+        text: match (refused, capped_empty, text.is_empty()) {
+            (true, _, true) => "the model declined to answer (stop_reason: refusal)".to_string(),
+            (_, true, _) => {
+                "the answer reached the token cap before any text (stop_reason: max_tokens); raise --max-tokens"
+                    .to_string()
+            }
+            _ => text,
         },
         model: str_of("model"),
         id: str_of("id"),
@@ -114,7 +124,7 @@ pub fn parse_reply(status: u16, body: &str) -> Reply {
             cache_read_input_tokens: get("cache_read_input_tokens"),
             cache_creation_input_tokens: get("cache_creation_input_tokens"),
         },
-        is_error: refused,
+        is_error: refused || capped_empty,
         invalid_model: false,
     }
 }
@@ -224,6 +234,45 @@ mod tests {
         assert_eq!(r.usage.cache_read_input_tokens, 4);
         assert_eq!(r.usage.cache_creation_input_tokens, 1);
         assert!(!r.is_error);
+    }
+
+    #[test]
+    fn a_200_that_is_not_a_message_is_an_error() {
+        for body in ["{}", r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#] {
+            let r = parse_reply(200, body);
+            assert!(r.is_error, "{body}");
+        }
+        assert_eq!(
+            parse_reply(200, r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"}}"#).text,
+            "200 overloaded_error: busy"
+        );
+    }
+
+    #[test]
+    fn a_cap_reached_before_any_text_is_an_error() {
+        let body = r#"{"id":"msg_3","model":"claude-opus-5","content":[{"type":"thinking","thinking":""}],"stop_reason":"max_tokens","usage":{"input_tokens":5,"output_tokens":16000}}"#;
+        let r = parse_reply(200, body);
+        assert!(r.is_error);
+        assert!(r.text.contains("--max-tokens"), "{}", r.text);
+        // With some text, a cut-off answer is still the answer.
+        let partial = r#"{"id":"msg_4","model":"m","content":[{"type":"text","text":"half"}],"stop_reason":"max_tokens"}"#;
+        assert!(!parse_reply(200, partial).is_error);
+    }
+
+    #[test]
+    fn a_named_auth_token_variable_is_sent_as_a_bearer_token() {
+        let env = env_with(&[(AUTH_TOKEN_ENV, "tok-1"), ("ZAI_AUTH_TOKEN", "zai-1")]);
+        for var in [AUTH_TOKEN_ENV, "ZAI_AUTH_TOKEN"] {
+            assert!(credential(Some(var), &env).unwrap().bearer, "{var}");
+        }
+        let env = env_with(&[("DEEPSEEK_API_KEY", "ds-1")]);
+        assert!(!credential(Some("DEEPSEEK_API_KEY"), &env).unwrap().bearer);
+    }
+
+    #[test]
+    fn the_model_listing_asks_for_one_full_page() {
+        let c = Credential::api_key(API_KEY_ENV, "k".into());
+        assert_eq!(models_request("https://api.anthropic.com", &c).url, "https://api.anthropic.com/v1/models?limit=1000");
     }
 
     #[test]

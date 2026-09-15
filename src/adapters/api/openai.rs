@@ -70,7 +70,9 @@ pub fn parse_reply(status: u16, body: &str) -> Reply {
     let message = choice.get("message");
     let text = message.and_then(|m| m.get("content")).map(content_text).unwrap_or_default();
     let refusal = message.and_then(|m| m.get("refusal")).and_then(Value::as_str).filter(|r| !r.is_empty());
-    let filtered = choice.get("finish_reason").and_then(Value::as_str) == Some("content_filter");
+    let finish = choice.get("finish_reason").and_then(Value::as_str).unwrap_or_default();
+    let filtered = finish == "content_filter";
+    let capped_empty = finish == "length" && text.is_empty() && refusal.is_none();
 
     let usage = v.get("usage");
     let get = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64).unwrap_or(0);
@@ -85,6 +87,10 @@ pub fn parse_reply(status: u16, body: &str) -> Reply {
         text: match (refusal, filtered, text.is_empty()) {
             (Some(refusal), _, _) => refusal.to_string(),
             (None, true, true) => "the provider filtered the answer (finish_reason: content_filter)".to_string(),
+            _ if capped_empty => {
+                "the answer reached the token cap before any text (finish_reason: length); raise --max-tokens"
+                    .to_string()
+            }
             _ => text,
         },
         model: str_of("model"),
@@ -97,7 +103,7 @@ pub fn parse_reply(status: u16, body: &str) -> Reply {
             cache_read_input_tokens: cached,
             cache_creation_input_tokens: 0,
         },
-        is_error: refusal.is_some() || filtered,
+        is_error: refusal.is_some() || filtered || capped_empty,
         invalid_model: false,
     }
 }
@@ -229,6 +235,16 @@ mod tests {
         let r = parse_reply(200, filtered);
         assert!(r.is_error);
         assert!(r.text.contains("content_filter"), "{}", r.text);
+    }
+
+    #[test]
+    fn a_cap_reached_before_any_text_is_an_error() {
+        let body = r#"{"id":"x","model":"m","choices":[{"message":{"content":""},"finish_reason":"length"}]}"#;
+        let r = parse_reply(200, body);
+        assert!(r.is_error);
+        assert!(r.text.contains("--max-tokens"), "{}", r.text);
+        let partial = r#"{"id":"x","model":"m","choices":[{"message":{"content":"half"},"finish_reason":"length"}]}"#;
+        assert!(!parse_reply(200, partial).is_error);
     }
 
     #[test]
