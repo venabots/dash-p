@@ -7,7 +7,8 @@
 //! was actually enforced -- the two things every harness is otherwise vague
 //! about. Commands: `run` (default; bare prompt is sugar), `list`,
 //! `capabilities`. Adapters live in `src/adapters/` (claude via `claude -p`, or
-//! the undocumented `--pty` drive with a Stop hook; codex via `codex exec`).
+//! the undocumented `--pty` drive with a Stop hook; codex via `codex exec`;
+//! opencode via `opencode run`; pi via `pi -p --mode json`).
 
 mod adapters;
 mod args;
