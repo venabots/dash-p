@@ -30,6 +30,7 @@ pub mod claude;
 pub mod claude_common;
 pub mod claude_pty;
 pub mod codex;
+pub mod exec;
 pub mod opencode;
 pub mod procgroup;
 
