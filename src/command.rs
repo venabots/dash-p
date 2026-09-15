@@ -67,7 +67,7 @@ it is read from stdin. `run`/`list`/`capabilities` are only recognised as the
 first argument.
 
 Run options:
-  -H, --harness <name|path>   claude (default) | codex | opencode | pi
+  -H, --harness <name|path>   claude (default) | codex | opencode | pi | anthropic-api
                               | path to a claude-compatible binary
       --model <id|default>    model id; 'default' requests the harness's own default
       --output-format <fmt>   text (default) | json ({answer,metadata}) | stream-json
@@ -81,6 +81,9 @@ Run options:
       --require-enforcement <class>   os-sandbox | any   (else exit 32 before running)
       --meta-file <path>      write the authoritative run-metadata envelope here
       --cwd <path>            working directory for the agent
+      --base-url <url>        API harnesses: provider URL (else the format's env var)
+      --api-key-env <var>     API harnesses: env var that holds the key
+      --max-tokens <n>        API harnesses: output token cap
       --timeout <seconds>     wall-time cap (default 300)
       --dangerously-skip-permissions
       --pty                   drive the agent's interactive TUI under a PTY, for
@@ -146,12 +149,17 @@ pub fn list_harnesses(w: &mut dyn Write) -> std::io::Result<()> {
         } else {
             "reserved"
         };
-        let version = h.probe_version();
-        let install = match &version {
-            Some(v) => format!("installed ({v})"),
-            None => "not found".to_string(),
+        let install = match adapters::api::Protocol::for_harness(&h) {
+            Some(protocol) => match adapters::api::credential_status(protocol) {
+                Ok(source) => format!("key set ({source})"),
+                Err(_) => "no key".to_string(),
+            },
+            None => match h.probe_version() {
+                Some(v) => format!("installed ({v})"),
+                None => "not found".to_string(),
+            },
         };
-        writeln!(w, "{name:<10} {status:<12} {install}")?;
+        writeln!(w, "{name:<14} {status:<12} {install}")?;
     }
     Ok(())
 }
@@ -196,6 +204,18 @@ pub fn list_models(w: &mut dyn Write, harness: Option<Harness>) -> std::io::Resu
         }
         first = false;
         writeln!(w, "harness: {}", h.name())?;
+        if let Some(protocol) = adapters::api::Protocol::for_harness(&h) {
+            match adapters::api::list_models(protocol) {
+                Ok(ids) => {
+                    for id in ids {
+                        writeln!(w, "  {id}")?;
+                    }
+                }
+                Err(why) => writeln!(w, "  models: (unavailable: {why})")?,
+            }
+            writeln!(w, "  note: the provider's own list for this key; pass --model <id> (there is no default)")?;
+            continue;
+        }
         match h {
             Harness::Codex => {
                 match crate::adapters::codex::configured_model() {
@@ -239,11 +259,13 @@ fn render_capabilities(w: &mut dyn Write, h: &Harness, adapter: &dyn Adapter) ->
     // case rather than a flattering average. The heading names the tier so the
     // dependency is not hidden.
     writeln!(w, "network (with --perms workspace-write):")?;
-    let mut sandboxed = false;
+    let mut held = Enforcement::Unenforced;
     for n in NETWORK_TIERS {
         match adapter.network_plan(Some(Perms::WorkspaceWrite), n, false) {
             Ok(plan) => {
-                sandboxed |= plan.enforcement == Enforcement::OsSandbox;
+                if plan.enforcement != Enforcement::Unenforced {
+                    held = plan.enforcement;
+                }
                 // Name the effective tier whenever it differs from the request,
                 // so a downgrade is visible here and not only after a run.
                 let effective = if plan.effective == n {
@@ -256,10 +278,12 @@ fn render_capabilities(w: &mut dyn Write, h: &Harness, adapter: &dyn Adapter) ->
             Err(_) => writeln!(w, "  {:<16} unsupported", n.label())?,
         }
     }
-    let net_label = if sandboxed {
-        "yes (sandbox blocks network)"
-    } else {
-        "no (--network is accepted but never enforced)"
+    let net_label = match held {
+        Enforcement::OsSandbox => "yes (sandbox blocks network)",
+        Enforcement::NoTools => "yes (no tools: the model cannot reach the network)",
+        Enforcement::AgentPolicy | Enforcement::Unenforced => {
+            "no (--network is accepted but never enforced)"
+        }
     };
     writeln!(w, "network-control: {net_label}")?;
     writeln!(w, "output-modes: text, json, stream-json")?;
@@ -377,6 +401,18 @@ mod tests {
         assert!(perms.contains("read-only        agent-policy"), "{perms}");
         assert!(perms.contains("workspace-write  none"), "{perms}");
         assert!(perms.contains("full             none"), "{perms}");
+    }
+
+    #[test]
+    fn capabilities_report_an_api_harness_as_holding_every_tier() {
+        let out = caps_for(Harness::AnthropicApi);
+        for tier in ["read-only", "workspace-write", "full"] {
+            assert!(out.contains(&format!("  {tier:<16} no-tools")), "{out}");
+        }
+        let (_, net) = out.split_once("network (with --perms workspace-write):").unwrap();
+        assert!(net.contains("none             no-tools"), "{net}");
+        assert!(net.contains("full             no-tools  (effective: none)"), "{net}");
+        assert!(out.contains("network-control: yes (no tools: the model cannot reach the network)"), "{out}");
     }
 
     #[test]

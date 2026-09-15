@@ -132,6 +132,18 @@ fn run(mut opts: Options) -> ExitCode {
     };
     let drive = adapter.drive();
 
+    // API-harness flags mean nothing to a CLI harness. Ignoring one would run
+    // with a setting the caller believes is in effect.
+    let api_flags = opts.api_only_flags();
+    if !opts.harness.is_api() && !api_flags.is_empty() {
+        eprintln!(
+            "dash-p: {} can only be used with an API harness, not '{}'",
+            api_flags.join(", "),
+            opts.harness.name()
+        );
+        return ExitCode::from(2);
+    }
+
     // No positional prompt: read it from stdin (so multiline prompts and pipes
     // work without shell escaping).
     if opts.prompt.is_empty() {
@@ -187,6 +199,19 @@ fn run(mut opts: Options) -> ExitCode {
         }
     };
     let enforced = policy::Enforced { perms: perms_enforcement, network };
+
+    // A harness with no tools holds every tier, but a write tier also grants
+    // nothing: the model cannot edit files. Say so rather than let a caller
+    // expect edits that cannot happen.
+    if let (Some(perms @ (policy::Perms::WorkspaceWrite | policy::Perms::Full)), Some(policy::Enforcement::NoTools)) =
+        (opts.perms, perms_enforcement)
+    {
+        eprintln!(
+            "dash-p: the {} harness gives the model no tools; --perms {} cannot let it change anything",
+            opts.harness.name(),
+            perms.label(),
+        );
+    }
 
     // A tier the harness *can* express but not at the level asked for is
     // reported in the envelope -- warn on stderr too, so a human running by

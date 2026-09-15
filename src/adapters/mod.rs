@@ -26,6 +26,7 @@ use crate::harness::Harness;
 use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
 use crate::transcript::Summary;
 
+pub mod api;
 pub mod claude;
 pub mod claude_common;
 pub mod claude_pty;
@@ -91,6 +92,7 @@ pub fn for_harness(harness: &Harness, pty: bool) -> Option<Box<dyn Adapter>> {
         Harness::Codex => Some(Box::new(codex::CodexAdapter)),
         Harness::Opencode => Some(Box::new(opencode::OpencodeAdapter)),
         Harness::Pi => Some(Box::new(pi::PiAdapter)),
+        Harness::AnthropicApi => Some(Box::new(api::ApiAdapter(api::Protocol::Anthropic))),
         Harness::Gemini => None,
     }
 }
@@ -333,6 +335,7 @@ mod tests {
         assert_eq!(for_harness(&crate::harness::Harness::Claude, true).unwrap().drive(), "pty");
         assert_eq!(for_harness(&crate::harness::Harness::Codex, false).unwrap().drive(), "exec");
         assert_eq!(for_harness(&crate::harness::Harness::Pi, false).unwrap().drive(), "exec");
+        assert_eq!(for_harness(&crate::harness::Harness::AnthropicApi, false).unwrap().drive(), "api");
     }
 }
 
@@ -356,6 +359,9 @@ pub enum DriverError {
     TranscriptUnavailable,
     Interrupted,
     Spawn(anyhow::Error),
+    /// The harness cannot start as configured (an API harness with no
+    /// credential), reported before any request.
+    Setup(String),
     Io(std::io::Error),
 }
 
@@ -367,7 +373,9 @@ impl DriverError {
             Self::SessionStartTimeout | Self::StopTimeout => ExitStatus::Timeout,
             Self::TranscriptUnavailable => ExitStatus::AgentError,
             Self::Interrupted => ExitStatus::Interrupted,
-            Self::ChildExitedEarly(_) | Self::Spawn(_) | Self::Io(_) => ExitStatus::Internal,
+            Self::ChildExitedEarly(_) | Self::Spawn(_) | Self::Setup(_) | Self::Io(_) => {
+                ExitStatus::Internal
+            }
         }
     }
 }
@@ -387,6 +395,7 @@ impl std::fmt::Display for DriverError {
             }
             Self::Interrupted => write!(f, "interrupted"),
             Self::Spawn(e) => write!(f, "failed to spawn the agent binary: {e}"),
+            Self::Setup(msg) => write!(f, "{msg}"),
             Self::Io(e) => write!(f, "io error: {e}"),
         }
     }

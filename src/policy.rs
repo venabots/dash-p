@@ -30,6 +30,10 @@ pub enum Enforcement {
     OsSandbox,
     /// Agent policy: enforced by instruction/permission-mode, not the OS.
     AgentPolicy,
+    /// No tools at all: the model is called directly and can only answer, so
+    /// nothing it returns runs. No tier can be exceeded, which is at least as
+    /// strong as an OS sandbox.
+    NoTools,
     /// Not enforced at all (the tier is requested but nothing stops the agent).
     Unenforced,
 }
@@ -37,7 +41,7 @@ pub enum Enforcement {
 /// The enforcement class a caller demands via `--require-enforcement`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequireEnforcement {
-    /// Must be an OS sandbox; anything weaker fails.
+    /// Must be an OS sandbox, or no tools at all; anything weaker fails.
     OsSandbox,
     /// Any real enforcement (os-sandbox or agent-policy); only `Unenforced` fails.
     Any,
@@ -86,6 +90,7 @@ impl Enforcement {
         match self {
             Self::OsSandbox => "os-sandbox",
             Self::AgentPolicy => "agent-policy",
+            Self::NoTools => "no-tools",
             Self::Unenforced => "none",
         }
     }
@@ -127,6 +132,12 @@ impl NetworkPlan {
     pub fn os_sandbox(effective: Network) -> Self {
         Self { effective, enforcement: Enforcement::OsSandbox }
     }
+
+    /// The model has no tools, so it has no network, whatever tier was asked
+    /// for. Takes no tier for the same reason `open` takes none.
+    pub fn no_tools() -> Self {
+        Self { effective: Network::None, enforcement: Enforcement::NoTools }
+    }
 }
 
 /// What a run actually enforced, for the metadata envelope. Grouped so the
@@ -158,7 +169,9 @@ impl RequireEnforcement {
     /// Whether `actual` meets this demand.
     pub fn satisfied_by(self, actual: Enforcement) -> bool {
         match self {
-            Self::OsSandbox => actual == Enforcement::OsSandbox,
+            // A run with no tools cannot exceed any tier, so it meets the
+            // strongest demand too.
+            Self::OsSandbox => matches!(actual, Enforcement::OsSandbox | Enforcement::NoTools),
             Self::Any => actual != Enforcement::Unenforced,
         }
     }
@@ -174,6 +187,14 @@ mod tests {
         assert!(req.satisfied_by(Enforcement::OsSandbox));
         assert!(!req.satisfied_by(Enforcement::AgentPolicy));
         assert!(!req.satisfied_by(Enforcement::Unenforced));
+    }
+
+    #[test]
+    fn no_tools_meets_every_demand() {
+        assert!(RequireEnforcement::OsSandbox.satisfied_by(Enforcement::NoTools));
+        assert!(RequireEnforcement::Any.satisfied_by(Enforcement::NoTools));
+        assert_eq!(Enforcement::NoTools.label(), "no-tools");
+        assert_eq!(NetworkPlan::no_tools().effective, Network::None);
     }
 
     #[test]
