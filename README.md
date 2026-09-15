@@ -63,8 +63,9 @@ today:
   because pi reads any argument that starts with `@` as a file to attach. Usage
   and cost come from pi's own events. `model_resolved` is `provider/model`: the
   model the provider reported when pi relays it, else the model id pi sent. A
-  failed call reports `unknown`. pi has no sandbox, so `--perms read-only` is
-  `agent-policy` at best — see Permissions.
+  failed call reports `unknown`, unless the provider already reported its model.
+  Usage includes the model calls that compaction and tools make. pi has no
+  sandbox, so `--perms read-only` is `agent-policy` at best — see Permissions.
 
 `gemini` is recognised and reserved (selecting it fails fast until it's wired
 up). A value that isn't a known name is treated as a path to a
@@ -202,13 +203,16 @@ sit outside that boundary, and dash-p does not claim them:
 Neither is introduced by dash-p, but `os-sandbox` should be read as "codex's
 sandbox, held to the tier you asked for", not "nothing can reach out".
 
-**What `agent-policy` covers on pi.** `--tools` is an allowlist, and it also
-filters extension and custom tools, so the model is offered nothing that writes
-or runs commands. pi itself still runs with your permissions:
+**What `agent-policy` covers on pi.** `--tools` is an allowlist by tool name,
+and it also filters extension and custom tools. pi itself still runs with your
+permissions:
 
 - **Extensions.** Global extensions in `~/.pi/agent/extensions` still load, and
   so do a project's `.pi/extensions` when you trusted that project in pi. Their
-  event handlers run unsandboxed. Only the tools they register are filtered.
+  event handlers run unsandboxed. Only the tools they register are filtered,
+  and an extension that registers `read`, `grep`, `find`, or `ls` replaces the
+  built-in tool. The replacement stays enabled, because the allowlist matches
+  names.
 - **Reads.** The read tools can read any file your user can, not only the
   working directory.
 
