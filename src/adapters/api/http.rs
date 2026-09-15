@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ureq::Agent;
+use ureq::tls::{RootCerts, TlsConfig};
 
 use super::HttpRequest;
 use crate::adapters::DriverError;
@@ -70,10 +71,14 @@ pub fn get(request: HttpRequest) -> Outcome {
 /// Redirects are not followed. ureq strips `Authorization` on a redirect but
 /// not `x-api-key`, so following one could send the key to another host, and a
 /// model API has no reason to redirect a request.
+///
+/// TLS trusts the platform's certificate store, so a gateway with a private CA
+/// or a TLS-inspecting corporate proxy works the way it does for other tools.
 fn agent(timeout: Duration) -> Agent {
     Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
+        .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
         .timeout_global(Some(timeout))
         .build()
         .into()
@@ -169,6 +174,14 @@ pub mod tests {
 
     fn opts(timeout_ms: u64) -> Options {
         Options { timeout_ms, ..Options::default() }
+    }
+
+    #[test]
+    fn tls_trusts_the_platform_store() {
+        // A gateway with a private CA, or a corporate proxy that inspects TLS,
+        // is trusted through the system store, not ureq's bundled roots.
+        let agent = agent(Duration::from_secs(1));
+        assert!(matches!(agent.config().tls_config().root_certs(), RootCerts::PlatformVerifier));
     }
 
     #[test]
