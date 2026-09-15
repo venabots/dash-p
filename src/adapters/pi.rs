@@ -27,8 +27,10 @@ use crate::args::Options;
 use crate::policy::{Enforcement, Network, NetworkPlan, Perms};
 use crate::transcript::{Summary, Usage};
 
-/// pi's read-only built-in tools. `--tools` is an allowlist that also filters
-/// extension and custom tools, so nothing that writes or runs commands is left.
+/// pi's read-only built-in tools. `--tools` is an allowlist by name that also
+/// filters extension and custom tools. An extension that registers a tool under
+/// one of these names replaces the built-in and stays enabled, which is one
+/// reason this is policy and not a sandbox.
 const READ_ONLY_TOOLS: &str = "read,grep,find,ls";
 
 /// Drives the `pi` CLI via its non-interactive JSON print mode.
@@ -108,13 +110,40 @@ fn fold_event(state: &mut Folded, line: &str) {
         }
         Some("turn_end") => state.num_turns += 1,
         Some("message_end") => {
-            if let Some(msg) = obj.get("message")
-                && msg.get("role").and_then(Value::as_str) == Some("assistant")
-            {
-                fold_assistant(state, msg);
+            let Some(msg) = obj.get("message") else {
+                return;
+            };
+            match msg.get("role").and_then(Value::as_str) {
+                Some("assistant") => fold_assistant(state, msg),
+                // A tool can make its own model calls (a subagent, say). pi
+                // reports that work on the tool result.
+                Some("toolResult") => add_usage(state, msg.get("usage")),
+                _ => {}
             }
         }
+        // Compaction summarizes the context with a model call of its own.
+        Some("compaction_end") => {
+            add_usage(state, obj.get("result").and_then(|r| r.get("usage")));
+        }
         _ => {}
+    }
+}
+
+/// Add one model call's usage and cost to the run totals. pi reports usage per
+/// call, never as a running total, so the run total is the sum.
+fn add_usage(state: &mut Folded, usage: Option<&Value>) {
+    let Some(u) = usage else {
+        return;
+    };
+    let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let total = &mut state.usage;
+    total.input_tokens = total.input_tokens.saturating_add(get("input"));
+    total.output_tokens = total.output_tokens.saturating_add(get("output"));
+    total.cache_read_input_tokens = total.cache_read_input_tokens.saturating_add(get("cacheRead"));
+    total.cache_creation_input_tokens =
+        total.cache_creation_input_tokens.saturating_add(get("cacheWrite"));
+    if let Some(cost) = u.get("cost").and_then(|c| c.get("total")).and_then(Value::as_f64) {
+        state.total_cost_usd += cost;
     }
 }
 
@@ -122,20 +151,7 @@ fn fold_assistant(state: &mut Folded, msg: &Value) {
     let str_of = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or_default();
     state.saw_assistant = true;
 
-    // Each assistant message reports the usage of its own model call, so the
-    // run total is the sum.
-    if let Some(u) = msg.get("usage") {
-        let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let total = &mut state.usage;
-        total.input_tokens = total.input_tokens.saturating_add(get("input"));
-        total.output_tokens = total.output_tokens.saturating_add(get("output"));
-        total.cache_read_input_tokens = total.cache_read_input_tokens.saturating_add(get("cacheRead"));
-        total.cache_creation_input_tokens =
-            total.cache_creation_input_tokens.saturating_add(get("cacheWrite"));
-        if let Some(cost) = u.get("cost").and_then(|c| c.get("total")).and_then(Value::as_f64) {
-            state.total_cost_usd += cost;
-        }
-    }
+    add_usage(state, msg.get("usage"));
 
 
     state.final_text = msg
@@ -339,6 +355,23 @@ mod tests {
         assert_eq!(f.usage.input_tokens, 12);
         assert_eq!(f.usage.cache_read_input_tokens, 10);
         assert!((f.total_cost_usd - 0.0010145).abs() < 1e-12);
+    }
+
+    #[test]
+    fn compaction_and_tool_model_work_count_toward_usage() {
+        // Automatic compaction and some tools make their own model calls. pi
+        // counts both in its session totals, so the envelope does too.
+        let compaction = r#"{"type":"compaction_end","reason":"threshold","result":{"summary":"s","firstKeptEntryId":"e1","tokensBefore":90000,"usage":{"input":100,"output":20,"cacheRead":0,"cacheWrite":7,"cost":{"total":0.05}}},"aborted":false,"willRetry":false}"#;
+        let tool_result = r#"{"type":"message_end","message":{"role":"toolResult","toolCallId":"c1","toolName":"subagent","content":[{"type":"text","text":"x"}],"isError":false,"usage":{"input":10,"output":5,"cacheRead":1,"cacheWrite":0,"cost":{"total":0.002}}}}"#;
+        let f = fold(&[SESSION, compaction, tool_result, ANSWER_END, TURN_END]);
+        assert_eq!(f.usage.input_tokens, 100 + 10 + 6);
+        assert_eq!(f.usage.output_tokens, 20 + 5 + 3);
+        assert_eq!(f.usage.cache_read_input_tokens, 1 + 5);
+        assert_eq!(f.usage.cache_creation_input_tokens, 7 + 1);
+        assert!((f.total_cost_usd - 0.0520145).abs() < 1e-12);
+        // Neither changes the answer or the model.
+        assert_eq!(f.final_text, "ok");
+        assert_eq!(f.model, "fake/fake-ok-2026-01-01");
     }
 
     #[test]
