@@ -11,6 +11,7 @@
 //! opencode via `opencode run`; pi via `pi -p --mode json`).
 
 mod adapters;
+mod ansi;
 mod args;
 mod command;
 mod dec;
