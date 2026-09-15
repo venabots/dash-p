@@ -140,10 +140,12 @@ fn parse_error(status: u16, v: &Value, body: &str) -> Reply {
     if message.is_empty() {
         return Reply::failure(format!("{status}: {}", super::excerpt(body)));
     }
+    // Anthropic says a model the caller cannot use with a 404
+    // `not_found_error` whose message starts with `model:`, whether or not the
+    // model exists. A compatible server says it in its own words.
+    let anthropic_rejection = status == 404 && kind == "not_found_error" && message.starts_with("model:");
     Reply {
-        // A model the caller cannot use is a 404 `not_found_error` whose message
-        // starts with `model:`, whether or not the model exists.
-        invalid_model: status == 404 && kind == "not_found_error" && message.starts_with("model:"),
+        invalid_model: anthropic_rejection || super::names_a_missing_model(status, message),
         ..Reply::failure(format!("{status} {kind}: {message}"))
     }
 }
@@ -298,6 +300,16 @@ mod tests {
         assert!(r.invalid_model);
         assert_eq!(r.text, "404 not_found_error: model: claude-bogus");
         assert_eq!(r.model, "", "a rejected model never ran");
+    }
+
+    #[test]
+    fn a_compatible_server_s_model_rejection_is_recognised_by_its_words() {
+        let vllm = r#"{"type":"error","error":{"type":"invalid_request_error","message":"The model `claude-x` does not exist."}}"#;
+        assert!(parse_reply(404, vllm).invalid_model);
+        let litellm = r#"{"error":{"message":"model claude-x not found","type":"invalid_request_error"}}"#;
+        assert!(parse_reply(400, litellm).invalid_model);
+        let overloaded = r#"{"type":"error","error":{"type":"overloaded_error","message":"the model is overloaded"}}"#;
+        assert!(!parse_reply(529, overloaded).invalid_model);
     }
 
     #[test]

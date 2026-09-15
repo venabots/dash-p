@@ -155,17 +155,10 @@ fn parse_error(status: u16, v: &Value, body: &str) -> Reply {
         .or_else(|| err.and_then(|e| e.get("type")).and_then(Value::as_str))
         .unwrap_or_default();
     let text = if kind.is_empty() { format!("{status}: {message}") } else { format!("{status} {kind}: {message}") };
-    Reply { invalid_model: code == "model_not_found" || names_a_missing_model(status, message), ..Reply::failure(text) }
-}
-
-/// A compatible server that sends no `model_not_found` code says it in words:
-/// vLLM's "The model `x` does not exist", Ollama's "model \"x\" not found",
-/// OpenRouter's "x is not a valid model ID".
-fn names_a_missing_model(status: u16, message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    matches!(status, 400 | 404)
-        && m.contains("model")
-        && (m.contains("not found") || m.contains("does not exist") || m.contains("not a valid model"))
+    Reply {
+        invalid_model: code == "model_not_found" || super::names_a_missing_model(status, message),
+        ..Reply::failure(text)
+    }
 }
 
 /// The model ids in a `GET {base}/models` response.

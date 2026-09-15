@@ -404,6 +404,16 @@ fn excerpt(body: &str) -> String {
     }
 }
 
+/// A compatible server that sends no machine-readable code for a rejected
+/// model says it in words: vLLM's "The model `x` does not exist", Ollama's
+/// "model \"x\" not found", OpenRouter's "x is not a valid model ID".
+fn names_a_missing_model(status: u16, message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    matches!(status, 400 | 404)
+        && m.contains("model")
+        && (m.contains("not found") || m.contains("does not exist") || m.contains("not a valid model"))
+}
+
 /// The ids in a models listing. Both formats use `{"data":[{"id":...}]}`.
 fn model_ids(body: &str) -> Result<Vec<String>, String> {
     let v: Value = serde_json::from_str(body).map_err(|_| format!("unexpected response: {}", excerpt(body)))?;
