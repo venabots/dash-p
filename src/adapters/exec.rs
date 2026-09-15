@@ -8,7 +8,7 @@
 //! prompt goes, and how the event stream folds into a `Summary`.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -111,17 +111,10 @@ pub fn run_jsonl(
 
     let mut replay = String::new();
     loop {
-        if signals::interrupted() {
-            procgroup::terminate_group(child.id());
-            let _ = child.wait();
+        if let Some(err) = stop_reason(start, timeout) {
+            tear_down(&mut child);
             let _ = reader.join();
-            return Err(DriverError::Interrupted);
-        }
-        if start.elapsed() > timeout {
-            procgroup::terminate_group(child.id());
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(DriverError::StopTimeout);
+            return Err(err);
         }
         match rx.recv_timeout(POLL) {
             Ok(line) => {
@@ -140,8 +133,37 @@ pub fn run_jsonl(
     }
 
     let _ = reader.join();
-    let status = child.wait().map_err(DriverError::Io)?;
+
+    // stdout closing does not mean the child has exited: it can linger (codex
+    // shutting down MCP servers) or hang. The same deadline covers that wait.
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(DriverError::Io)? {
+            break status;
+        }
+        if let Some(err) = stop_reason(start, timeout) {
+            tear_down(&mut child);
+            return Err(err);
+        }
+        thread::sleep(POLL);
+    };
     Ok(Finished { success: status.success(), replay, stderr })
+}
+
+/// Why the run has to stop now, if it does: an interrupt, or the deadline.
+fn stop_reason(start: Instant, timeout: Duration) -> Option<DriverError> {
+    if signals::interrupted() {
+        Some(DriverError::Interrupted)
+    } else if start.elapsed() > timeout {
+        Some(DriverError::StopTimeout)
+    } else {
+        None
+    }
+}
+
+/// Kill the child's whole process group and reap it.
+fn tear_down(child: &mut Child) {
+    procgroup::terminate_group(child.id());
+    let _ = child.wait();
 }
 
 /// Close a stream-json run with the trailing `result` envelope. Returns whether
@@ -267,6 +289,17 @@ mod tests {
         let err = run_jsonl(sh("sleep 5"), None, &short, None, |_| {}).err().unwrap();
         assert!(matches!(err, DriverError::StopTimeout), "got: {err}");
         assert!(started.elapsed() < Duration::from_secs(3), "the child was not killed");
+    }
+
+    #[test]
+    fn a_child_that_closes_stdout_and_lingers_is_still_held_to_the_timeout() {
+        // codex has been seen to linger after its answer (MCP shutdown). The
+        // deadline has to cover that wait too, not only the read.
+        let short = Options { timeout_ms: 300, ..Options::default() };
+        let started = Instant::now();
+        let err = run_jsonl(sh("exec 1>&-; sleep 5"), None, &short, None, |_| {}).err().unwrap();
+        assert!(matches!(err, DriverError::StopTimeout), "got: {err}");
+        assert!(started.elapsed() < Duration::from_secs(3), "the lingering child was not killed");
     }
 
     #[test]
