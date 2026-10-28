@@ -208,10 +208,6 @@ fn build_argv(opts: &Options) -> Vec<String> {
         v.push("--model".to_string());
         v.push(m.clone());
     }
-    if let Some(cwd) = &opts.cwd {
-        v.push("--dir".to_string());
-        v.push(cwd.clone());
-    }
     // opencode has no OS sandbox tiers; `--auto` auto-approves every tool.
     // Map it from an explicit bypass or the `full` perms tier only -- the
     // read-only / workspace-write tiers keep opencode's default gating.
@@ -238,6 +234,12 @@ fn run(opts: &Options, mut stream_out: Option<&mut dyn Write>) -> Result<RunOutc
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // opencode 2.x removed `run --dir` and takes its directory from `PWD`,
+        // not the real process cwd, so set both. `PWD` must be absolute.
+        if let Some(cwd) = &opts.cwd {
+            let dir = std::path::absolute(cwd).map_err(|e| DriverError::Spawn(e.into()))?;
+            cmd.current_dir(&dir).env("PWD", &dir);
+        }
         // opencode spawns its own tool subprocesses; lead a process group so an
         // interrupt/timeout tears the whole tree down, not just the top level.
         procgroup::lead_process_group(&mut cmd);
@@ -504,7 +506,8 @@ mod tests {
         assert_eq!(v[0], "run");
         assert!(v.windows(2).any(|w| w == ["--format", "json"]));
         assert!(v.windows(2).any(|w| w == ["--model", "anthropic/claude-sonnet-4"]));
-        assert!(v.windows(2).any(|w| w == ["--dir", "/work"]));
+        // opencode 2.x rejects `--dir`; cwd is set on the process instead.
+        assert!(!v.contains(&"--dir".to_string()));
         assert!(v.contains(&"--auto".to_string()));
         assert_eq!(v[v.len() - 2], "--");
         assert_eq!(v.last().unwrap(), "hi");
