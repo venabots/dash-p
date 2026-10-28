@@ -601,3 +601,29 @@ fn codex_add_dir_grants_a_writable_root() {
     // The sandbox is still on: the pin did not simply open everything up.
     assert_eq!(meta["enforcement"], "os-sandbox", "meta: {meta}");
 }
+
+/// opencode 2.x removed `run --dir` and reads its directory from `PWD`, so
+/// `--cwd` must reach it through the environment. The token is only in a file
+/// inside `--cwd`, so the answer has it only if opencode ran there.
+#[test]
+fn opencode_runs_in_the_cwd() {
+    if !e2e_enabled() {
+        eprintln!("skipping (set DASHP_E2E=1)");
+        return;
+    }
+    let workspace = std::env::temp_dir().join(format!("dash-p-oc-cwd-{}", probe_token()));
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let token = unique_token();
+    std::fs::write(workspace.join("MARKER.txt"), &token).expect("marker");
+
+    let out = run(&[
+        "-H", "opencode", "--timeout", "120",
+        "--cwd", &workspace.to_string_lossy(),
+        "--", "Read MARKER.txt in the current directory and reply with its exact contents only.",
+    ]);
+    let _ = std::fs::remove_dir_all(&workspace);
+
+    let answer = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(answer.contains(&token), "opencode did not run in --cwd: {answer}");
+}
